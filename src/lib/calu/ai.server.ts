@@ -424,6 +424,17 @@ export function getAIProvider(): AIProvider {
   throw new AiUnavailable("A análise por IA não está disponível neste ambiente.");
 }
 
+export function classifyAiFailure(error: unknown): string {
+  if (error instanceof AiUnavailable && error.message === "INVALID_JSON") return "invalid_json";
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (/429|too many/i.test(message)) return "rate_limited";
+  if (/timeout|aborted|timed out/i.test(message)) return "timeout";
+  if (/invalid json|UNEXPECTED_TOKEN|JSON/i.test(message) && /json/i.test(message)) return "invalid_json";
+  if (error instanceof AiUnavailable || /não está disponível|unavailable|ECONNREFUSED/i.test(message)) return "provider_unavailable";
+  if (/\b500\b|internal server/i.test(message)) return "provider_error";
+  return "provider_error";
+}
+
 export function aiErrorMessage(error: unknown): string {
   if (error instanceof AiUnavailable && error.message !== "INVALID_JSON") return error.message;
   return "Não consegui analisar essa refeição com segurança. Você pode tentar de novo ou registrar os alimentos manualmente.";

@@ -1,6 +1,8 @@
+import { classifyRuntime } from "./runtime-env.ts";
+
 /**
- * Decide o backend de banco. PGLite é só desenvolvimento e preview local.
- * Produção implantada sem DATABASE_URL falha — nunca cai em banco efêmero.
+ * Decide o backend de banco. PGLite é desenvolvimento, teste e preview sem URL.
+ * Produção real sem DATABASE_URL falha — nunca cai em banco efêmero.
  */
 export type DbDecision =
   | { source: "neon" }
@@ -20,13 +22,6 @@ export function resolveDbBackend(env: {
 }): DbDecision {
   const url = env.databaseUrl?.trim();
   if (url) return { source: "neon" };
-
-  const deployed = Boolean(env.grokProjectId?.trim() || env.vercel === "1" || env.vercelEnv);
-  const production =
-    env.caluEnv === "production" ||
-    env.vercelEnv === "production" ||
-    (env.nodeEnv === "production" && deployed);
-
-  if (production) return { source: "error", message: PRODUCTION_DB_ERROR };
+  if (classifyRuntime(env) === "production") return { source: "error", message: PRODUCTION_DB_ERROR };
   return { source: "pglite" };
 }

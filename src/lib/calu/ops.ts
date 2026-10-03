@@ -1,7 +1,9 @@
 import type { Sql } from "@/lib/db";
 import { AI_LIMITS, type PlanId } from "./domain.ts";
 import { ensureUsageSql, quotaColumn, releaseQuotaSql, reserveQuotaSql, type QuotaKind } from "./quota.ts";
-import { HIT_RATE_SQL, RATE_LIMITS, rateWindowId, type RateAction } from "./rate-limit.ts";
+import { HIT_RATE_SQL, CLEANUP_RATE_SQL, RATE_LIMITS, rateWindowId, type RateAction } from "./rate-limit.ts";
+import { canonicalOperation, priceCall } from "./pricing.ts";
+import { logEvent } from "./observe.ts";
 import { dayKeyInTimeZone } from "./timezone.ts";
 
 const QUOTA_LABEL: Record<QuotaKind, string> = {
@@ -63,9 +65,16 @@ export async function hitRateLimit(
   nowMs = Date.now(),
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const windowId = rateWindowId(nowMs);
-  const rows = await sql.query<{ hits: number }>(HIT_RATE_SQL, [userId, action, windowId]);
-  const hits = Number(rows[0]?.hits ?? 0);
-  if (hits > RATE_LIMITS[action]) {
+  const limit = RATE_LIMITS[action];
+  await sql.query(CLEANUP_RATE_SQL, [windowId - 2]).catch(() => undefined);
+  const rows = await sql.query<{ hits: number }>(HIT_RATE_SQL, [userId, action, windowId, limit]);
+  if (!rows[0]) {
+    logEvent("rate_limit_rejected", {
+      category: "RATE_LIMIT",
+      userId,
+      operation: action,
+      success: false,
+    });
     return { ok: false, error: "Muitas tentativas em pouco tempo. Espere um minuto e tente de novo." };
   }
   return { ok: true };
@@ -83,22 +92,24 @@ export async function recordAiCall(
     success: boolean;
     durationMs: number;
     requestId: string;
+    errorType?: string | null;
   },
 ): Promise<void> {
-  const estimated =
-    input.inputTokens == null && input.outputTokens == null
-      ? null
-      : ((input.inputTokens ?? 0) * (input.provider === "gemini" ? 0.15 : 2) +
-          (input.outputTokens ?? 0) * (input.provider === "gemini" ? 0.6 : 6)) /
-        1_000_000;
+  const priced = priceCall({
+    provider: input.provider,
+    inputTokens: input.inputTokens,
+    outputTokens: input.outputTokens,
+  });
+  const operation = canonicalOperation(input.operation);
   await sql`
     insert into ai_calls (
-      id, user_id, operation, provider, model, input_tokens, output_tokens, estimated_cost,
-      success, duration_ms, request_id
+      id, user_id, operation, provider, model, input_tokens, output_tokens, total_tokens,
+      estimated_cost, pricing_version, success, duration_ms, request_id, error_type
     ) values (
-      ${crypto.randomUUID()}, ${input.userId}, ${input.operation}, ${input.provider}, ${input.model},
-      ${input.inputTokens}, ${input.outputTokens}, ${estimated}, ${input.success}, ${input.durationMs},
-      ${input.requestId}
+      ${crypto.randomUUID()}, ${input.userId}, ${operation}, ${input.provider}, ${input.model},
+      ${input.inputTokens}, ${input.outputTokens}, ${priced.totalTokens}, ${priced.estimatedCost},
+      ${priced.pricingVersion}, ${input.success}, ${input.durationMs}, ${input.requestId},
+      ${input.errorType ?? null}
     )
   `;
 }

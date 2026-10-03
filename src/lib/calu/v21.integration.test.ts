@@ -54,27 +54,32 @@ test("falha de provedor devolve a reserva de quota", async () => {
   assert.equal(Number(left.rows[0]?.text_count), 0);
 });
 
-test("rate limit atômico corta o excesso", async () => {
+test("rate limit atômico corta o excesso e rejeição não incrementa", async () => {
   const pg = await database();
   async function hit() {
-    const rows = await pg.query<{ hits: number }>(HIT_RATE_SQL, ["user-a", "analyzePhoto", 1]);
-    return Number(rows.rows[0]?.hits);
+    const rows = await pg.query<{ hits: number }>(HIT_RATE_SQL, ["user-a", "analyzePhoto", 1, 8]);
+    return rows.rows[0] ? Number(rows.rows[0].hits) : null;
   }
   const hits = [];
   for (let i = 0; i < 10; i += 1) hits.push(await hit());
-  assert.deepEqual(hits, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-  assert.ok(hits.filter((value) => value <= 8).length === 8);
+  assert.deepEqual(hits, [1, 2, 3, 4, 5, 6, 7, 8, null, null]);
+  const left = await pg.query<{ hits: number }>("select hits from rate_limits where user_id = $1 and window_id = 1", ["user-a"]);
+  assert.equal(Number(left.rows[0]?.hits), 8);
 });
 
 test("rate limit concorrente respeita o teto de aceitos", async () => {
   const pg = await database();
   const hits = await Promise.all(
     Array.from({ length: 20 }, () =>
-      pg.query<{ hits: number }>(HIT_RATE_SQL, ["user-a", "analyzePhoto", 42]).then((result) => Number(result.rows[0]?.hits)),
+      pg
+        .query<{ hits: number }>(HIT_RATE_SQL, ["user-a", "analyzePhoto", 42, 8])
+        .then((result) => (result.rows[0] ? Number(result.rows[0].hits) : null)),
     ),
   );
-  assert.equal(hits.filter((value) => value <= 8).length, 8);
-  assert.equal(Math.max(...hits), 20);
+  const accepted = hits.filter((value): value is number => value != null);
+  assert.equal(accepted.length, 8);
+  assert.equal(Math.max(...accepted), 8);
+  assert.equal(hits.filter((value) => value == null).length, 12);
 });
 
 test("usuário B não lê refeição de A e exclusão de conta zera identidade", async () => {

@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="CALU">
-  <rect width="32" height="32" rx="8" fill="#F6F1E8"/>
-  <path fill="#B5522A" d="M5.5 13.2h21c-.4 6.6-4.6 11.3-10.5 11.3S5.9 19.8 5.5 13.2z"/>
-  <ellipse cx="16" cy="13.1" rx="10.6" ry="3.15" fill="#B5522A"/>
-  <ellipse cx="16" cy="12.7" rx="7.4" ry="1.85" fill="#FFFAF4"/>
-  <path fill="none" stroke="#241C16" stroke-width="1.15" stroke-linecap="round" d="M11.2 12.4c.6-2.3 2.4-3.6 4.8-3.6 2.5 0 4.3 1.4 4.8 3.7"/>
-</svg>

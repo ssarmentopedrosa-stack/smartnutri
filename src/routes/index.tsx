@@ -173,7 +173,12 @@ function HomeBody({ day, userId, onDay }: { day: string; userId: string; onDay: 
             </div>
           </div>
           {totals.incomplete ? <p className="mt-3 text-xs text-subtle">Parte do dia está sem dados completos. O total é parcial.</p> : null}
-          {goals.isEstimate && !minor ? (
+          {!minor && goals.isEstimate && (goals.source === "GENERIC_REFERENCE" || home.profile.age == null || home.profile.heightCm == null || home.profile.weightKg == null) ? (
+            <>
+              <p className="mt-3 text-sm">Precisamos de mais informações para personalizar sua meta.</p>
+              <p className="mt-1 text-xs text-subtle">Referência geral — não é uma meta personalizada.</p>
+            </>
+          ) : goals.isEstimate && !minor ? (
             <p className="mt-3 text-xs text-subtle">Referência diária estimada. Não é uma meta obrigatória e não substitui orientação profissional.</p>
           ) : null}
         </section>

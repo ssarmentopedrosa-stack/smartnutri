@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { analyzePhoto, analyzeText, lookupBarcode, saveMeal } from "@/lib/calu/api";
-import { foodFromTaco, searchTaco } from "@/lib/calu/catalog";
+import { foodFromTaco } from "@/lib/calu/catalog";
+import { searchFoods } from "@/lib/calu/search";
 import { compressImage, enqueueMeal, friendlyError, isOfflineError, todayKey, type MealPayload } from "@/lib/calu/client";
 import {
   makeFood,
@@ -190,7 +191,7 @@ function RegisterPage() {
           source: "barcode",
           dataStatus: item.completeness === "unavailable" ? "unavailable" : "reference",
         });
-      draft.nutritionSource = "OPEN_FOOD_FACTS";
+      draft.nutritionSource = item.nutritionSource;
       draft.nutritionConfidence = item.completeness === "complete" ? 0.9 : item.completeness === "partial" ? 0.55 : 0;
       setFoods([draft]);
       setUncertainties([item.note]);
@@ -239,7 +240,8 @@ function RegisterPage() {
     }
   }
 
-  const hits = searchTaco(query);
+  const hits = searchFoods(query);
+  const ask = query.trim().length >= 2 && hits.length > 0 && hits[0]?.confidence !== "high";
   const title =
     phase === "analyzing"
       ? "Analisando"
@@ -329,14 +331,18 @@ function RegisterPage() {
       {phase === "capture" && modo === "busca" ? (
         <div className="mt-6">
           <input className={controlClass} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Arroz, feijão, tapioca..." />
+          {ask ? (
+            <p className="mt-3 text-sm">Você quis dizer — confirme o alimento. Nada é registrado sem a sua escolha.</p>
+          ) : null}
           <ul className="mt-3 space-y-2">
-            {hits.map((food) => (
-              <li key={food.id}>
+            {hits.map((hit) => (
+              <li key={hit.food.id}>
                 <button
                   type="button"
                   className="w-full rounded-2xl border border-border bg-card px-4 py-3 text-left"
                   onClick={() => {
-                    const built = foodFromTaco(food, 100, "g");
+                    const built = foodFromTaco(hit.food, 100, "g");
+                    built.draft.review = hit.confidence === "low" ? "low" : "high";
                     setFoods([built.draft]);
                     setUncertainties(built.note ? [built.note] : []);
                     setSource("search");
@@ -344,9 +350,10 @@ function RegisterPage() {
                     setPhase("review");
                   }}
                 >
-                  <span className="font-medium">{food.name}</span>
+                  <span className="font-medium">{hit.food.name}</span>
                   <span className="mt-1 block text-sm text-muted">
-                    {food.kcal == null ? "Dados não disponíveis" : `${food.kcal} kcal / 100 g · ${food.category}`}
+                    {hit.food.kcal == null ? "Dados não disponíveis" : `${hit.food.kcal} kcal / 100 g · TACO`}
+                    {hit.confidence === "high" ? " · alta confiança" : hit.confidence === "medium" ? " · confirme" : " · baixa confiança"}
                   </span>
                 </button>
               </li>

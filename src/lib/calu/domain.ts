@@ -21,6 +21,8 @@ export const UNITS = [
   "unidade",
   "fatia",
   "colher",
+  "colher de sopa",
+  "colher de chá",
   "concha",
   "xícara",
   "copo",
@@ -257,6 +259,8 @@ export function quantityStep(unit: string): number {
     case "L":
       return 0.1;
     case "colher":
+    case "colher de sopa":
+    case "colher de chá":
     case "porção":
       return 0.5;
     default:
@@ -350,7 +354,7 @@ export function estimateGoals(input: {
       personal: false,
       qualitative: false,
       audience: "insufficient",
-      note: "Sem idade, altura e peso suficientes, usamos uma referência genérica. Não é uma meta pessoal e não substitui orientação profissional.",
+      note: "Precisamos de mais informações para personalizar sua meta. Referência geral — não é uma meta personalizada.",
     };
   }
 

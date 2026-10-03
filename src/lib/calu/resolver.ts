@@ -13,7 +13,7 @@ export type ResolvedFood = {
   liquid: boolean;
 };
 
-const ALIASES: Record<string, string> = {
+export const FOOD_ALIASES: Record<string, string> = {
   arroz: "Arroz, tipo 1, cozido",
   "arroz branco": "Arroz, tipo 1, cozido",
   "arroz cozido": "Arroz, tipo 1, cozido",
@@ -72,7 +72,7 @@ function tokens(value: string): string[] {
 export function resolveFoodName(rawName: string): ResolvedFood {
   const name = rawName.trim().slice(0, 80);
   const key = fold(name);
-  const alias = ALIASES[key];
+  const alias = FOOD_ALIASES[key];
   if (alias) {
     const food = TACO_FOODS.find((item) => item.name === alias);
     if (food) {

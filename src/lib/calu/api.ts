@@ -44,7 +44,10 @@ import {
   wipeUserData,
 } from "./ops";
 import { normalizeOffProduct } from "./off";
-import { parseBarcode, parseDay, parseEntityId, parseImageBase64 } from "./validation";
+import { calculateNutrition } from "./nutrition";
+import { resolveFoodName } from "./resolver";
+import { preferStructuredSource } from "./search";
+import { parseBarcode, parseDay, parseEntityId, parseImageBase64, parseAge } from "./validation";
 import { isValidTimeZone, shiftDayKey } from "./timezone";
 import { getDailySummary, summarizeWindow, type DailySummary, type DayAgg } from "./longitudinal";
 import { fallbackCoach, parseCoach } from "./coach";
@@ -184,7 +187,7 @@ function mapGoals(row: GoalRow): GoalTargets & { isEstimate: boolean; qualitativ
     waterMl: Math.round(Number(row.water_ml)),
     isEstimate: asBool(row.is_estimate),
     qualitative: asBool(row.qualitative),
-    source: row.source === "USER_DEFINED" || row.source === "QUALITATIVE" ? row.source : "AI_ESTIMATE",
+    source: row.source === "USER_DEFINED" || row.source === "QUALITATIVE" || row.source === "GENERIC_REFERENCE" ? row.source : "AI_ESTIMATE",
   };
 }
 
@@ -390,10 +393,7 @@ function parseProfile(input: unknown): ProfileInput {
   const body = (input ?? {}) as Record<string, unknown>;
   const name = String(body.name ?? "").trim();
   if (name.length < 2 || name.length > 60) throw new Error("Informe como quer ser chamado.");
-  const ageRaw = body.age === "" || body.age == null ? null : Number(body.age);
-  if (ageRaw != null && (!Number.isInteger(ageRaw) || ageRaw < 13 || ageRaw > 120)) {
-    throw new Error("Idade entre 13 e 120, ou deixe em branco.");
-  }
+  const ageRaw = parseAge(body.age);
   const sex: SexId =
     body.sex === "feminino" || body.sex === "masculino" ? body.sex : "nao_informar";
   const height = body.heightCm === "" || body.heightCm == null ? null : Number(body.heightCm);
@@ -616,7 +616,7 @@ export const saveProfile = createServerFn({ method: "POST" })
         const goalRows = await tx`select user_id from goals where user_id = ${uid}`;
         if (!goalRows[0] || data.recalculate) {
           const estimated = estimateGoals(data);
-          const source = estimated.qualitative ? "QUALITATIVE" : "AI_ESTIMATE";
+          const source = estimated.qualitative ? "QUALITATIVE" : estimated.audience === "insufficient" ? "GENERIC_REFERENCE" : "AI_ESTIMATE";
           await tx`
             insert into goals (
               user_id, calories, protein, carbohydrates, fat, fiber, water_ml, is_estimate, source, qualitative, updated_at
@@ -849,10 +849,30 @@ async function guardedAi<T>(
   const started = Date.now();
   const sql = await getSql();
   const limited = await hitRateLimit(sql, userId, action);
-  if (!limited.ok) return limited;
+  if (!limited.ok) {
+    logEvent("rate_limit_rejected", {
+      category: "RATE_LIMIT",
+      requestId,
+      userId,
+      operation,
+      success: false,
+      durationMs: Date.now() - started,
+    });
+    return limited;
+  }
   const day = await quotaDay(sql, userId);
   const reserved = await reserveQuota(sql, userId, day, kind);
-  if (!reserved.ok) return reserved;
+  if (!reserved.ok) {
+    logEvent("quota_rejected", {
+      category: "QUOTA",
+      requestId,
+      userId,
+      operation,
+      success: false,
+      durationMs: Date.now() - started,
+    });
+    return reserved;
+  }
   const minor = await isMinorUser(sql, userId);
   try {
     const result = await run(minor);
@@ -868,6 +888,7 @@ async function guardedAi<T>(
       requestId,
     });
     logEvent("ai_analysis_completed", {
+      category: "AI",
       requestId,
       userId,
       provider: result.usage.provider,
@@ -879,7 +900,7 @@ async function guardedAi<T>(
     return { ok: true, data: result.value };
   } catch (error) {
     await releaseQuota(sql, userId, day, kind);
-    const { aiErrorMessage } = await import("./ai.server");
+    const { aiErrorMessage, classifyAiFailure } = await import("./ai.server");
     await recordAiCall(sql, {
       userId,
       operation,
@@ -890,13 +911,16 @@ async function guardedAi<T>(
       success: false,
       durationMs: Date.now() - started,
       requestId,
+      errorType: classifyAiFailure(error),
     }).catch(() => undefined);
     logEvent("ai_analysis_failed", {
+      category: "AI",
       requestId,
       userId,
       operation,
       durationMs: Date.now() - started,
       success: false,
+      errorType: classifyAiFailure(error),
     });
     return { ok: false, error: aiErrorMessage(error) };
   }
@@ -1301,7 +1325,7 @@ export const lookupBarcode = createServerFn({ method: "POST" })
     fiber: number | null;
     note: string;
     completeness: "complete" | "partial" | "unavailable";
-    nutritionSource: "OPEN_FOOD_FACTS";
+    nutritionSource: "OPEN_FOOD_FACTS" | "TACO";
   }>> => {
     return quiet(async () => {
       const sql = await getSql();
@@ -1320,15 +1344,20 @@ export const lookupBarcode = createServerFn({ method: "POST" })
         }
       }
       if (!normalized || "error" in normalized) {
-        let res: Response;
-        try {
-          res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(data)}.json`, {
-            headers: { "User-Agent": "CaluAI/1.0 (meal diary; contact via app)" },
-            signal: AbortSignal.timeout(8000),
-          });
-        } catch {
-          return { ok: false, error: "Não consegui consultar o código agora. Tente de novo." };
+        let res: Response | null = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(data)}.json`, {
+              headers: { "User-Agent": "CaluAI/1.0 (meal diary; contact via app)" },
+              signal: AbortSignal.timeout(8000),
+            });
+            if (res.status >= 500 && attempt === 0) continue;
+            break;
+          } catch {
+            if (attempt === 1) return { ok: false, error: "Não consegui consultar o código agora. Tente de novo." };
+          }
         }
+        if (!res) return { ok: false, error: "Não consegui consultar o código agora. Tente de novo." };
         if (res.status === 404) return { ok: false, error: "Produto não encontrado." };
         if (!res.ok) return { ok: false, error: "Não consegui consultar o código agora. Tente de novo." };
         const body = await res.json().catch(() => null);
@@ -1361,6 +1390,25 @@ export const lookupBarcode = createServerFn({ method: "POST" })
         `;
       }
       if ("error" in normalized) return { ok: false, error: String(normalized.error) };
+      const resolved = resolveFoodName(normalized.name);
+      const choice = preferStructuredSource({ taco: resolved, offPer100: normalized.per100 });
+      let calories = normalized.calories == null ? null : Math.round(normalized.calories);
+      let protein = normalized.protein;
+      let carbohydrates = normalized.carbohydrates;
+      let fat = normalized.fat;
+      let fiber = normalized.fiber;
+      let note = normalized.note;
+      let nutritionSource: "OPEN_FOOD_FACTS" | "TACO" = "OPEN_FOOD_FACTS";
+      if (choice.keptTaco && choice.per100) {
+        const scaled = calculateNutrition(choice.per100, normalized.quantity);
+        calories = scaled.calories;
+        protein = scaled.protein;
+        carbohydrates = scaled.carbohydrates;
+        fat = scaled.fat;
+        fiber = scaled.fiber;
+        nutritionSource = "TACO";
+        note = "Mantida a referência TACO. Open Food Facts não substituiu este item.";
+      }
       await trackEvent(sql, context.userId, "barcode_used");
       return {
         ok: true as const,
@@ -1368,14 +1416,14 @@ export const lookupBarcode = createServerFn({ method: "POST" })
           name: normalized.name,
           quantity: normalized.quantity,
           unit: normalized.unit,
-          calories: normalized.calories == null ? null : Math.round(normalized.calories),
-          protein: normalized.protein,
-          carbohydrates: normalized.carbohydrates,
-          fat: normalized.fat,
-          fiber: normalized.fiber,
-          note: normalized.note,
+          calories,
+          protein,
+          carbohydrates,
+          fat,
+          fiber,
+          note,
           completeness: normalized.completeness,
-          nutritionSource: "OPEN_FOOD_FACTS" as const,
+          nutritionSource,
         },
       };
     });

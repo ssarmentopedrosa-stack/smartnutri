@@ -76,10 +76,11 @@ export function toGrams(name: string, quantity: number, unit: string, liquid = f
     const grams = known(PIECES, folded);
     return grams == null ? null : grams * quantity;
   }
-  if (unit === "colher") {
+  if (unit === "colher" || unit === "colher de sopa") {
     const grams = known(SPOONS, folded);
     return grams == null ? null : grams * quantity;
   }
+  if (unit === "colher de chá") return null;
   if (unit === "xícara" || unit === "xicara") {
     const grams = known(CUPS, folded);
     return grams == null ? null : grams * quantity;

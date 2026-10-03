@@ -1,6 +1,7 @@
 import { makeFood, routeConfidence, type Analysis, type FoodDraft } from "./domain.ts";
 import { calculateNutrition, toGrams } from "./nutrition.ts";
 import { resolveFoodName, type NutritionSourceId } from "./resolver.ts";
+import { searchNeedsConfirmation } from "./search.ts";
 
 function clamp01(value: number | null | undefined): number | null {
   if (value == null || !Number.isFinite(value)) return null;
@@ -14,10 +15,11 @@ export function enrichAnalysis(analysis: Analysis): Analysis {
     const identification = clamp01(food.identificationConfidence ?? food.confidence);
     let portion = clamp01(food.portionConfidence ?? food.confidence);
     const grams = toGrams(resolved.taco?.name ?? food.name, food.quantity, food.unit, resolved.liquid);
+    const ambiguous = searchNeedsConfirmation(food.name);
     let draft = food;
     let nutritionSource: NutritionSourceId = "AI_ESTIMATE";
     let nutritionConfidence = 0.35;
-    if (resolved.per100 && resolved.matchConfidence >= 0.8 && grams != null && resolved.per100.calories != null) {
+    if (resolved.per100 && resolved.matchConfidence >= 0.8 && grams != null && resolved.per100.calories != null && !ambiguous) {
       const nutrients = calculateNutrition(resolved.per100, grams);
       nutritionSource = "TACO";
       nutritionConfidence = resolved.matchConfidence;
@@ -40,6 +42,9 @@ export function enrichAnalysis(analysis: Analysis): Analysis {
       if (!uncertainties.some((item) => item.includes(food.name))) {
         uncertainties.push(`Sem conversão confiável para ${food.name}. Confirme a quantidade.`);
       }
+    }
+    if (ambiguous && !uncertainties.some((item) => item.includes("Confirme o alimento"))) {
+      uncertainties.push(`Confirme o alimento “${food.name.trim()}”. Há opções parecidas e nada foi escolhido automaticamente.`);
     }
     const review = routeConfidence(identification, portion);
     return {

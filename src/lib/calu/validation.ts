@@ -1,3 +1,20 @@
+export function parseAge(value: unknown): number | null {
+  if (value === "" || value == null) return null;
+  const age = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(age) || age < 13 || age > 120) {
+    throw new Error("Idade entre 13 e 120, ou deixe em branco.");
+  }
+  return age;
+}
+
+/** Recusa dia de calendário inexistente (já em parseDay) e dia posterior ao informado. */
+export function assertNotFutureDay(day: string, today: string): string {
+  const parsed = parseDay(day);
+  const current = parseDay(today);
+  if (parsed > current) throw new Error("Data futura não pode ser registrada.");
+  return parsed;
+}
+
 export function parseDay(value: unknown): string {
   const day = String(value ?? "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("Data inválida.");
