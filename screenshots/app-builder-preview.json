@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "CALU — acompanhamento alimentar",
+      "hasCanvas": false,
+      "bodyTextLen": 157,
+      "bodyTextHash": "6a74635a185f24c17131f796ae1c6b69bade52db9720acb932f1049572d6cf9f",
+      "bodyTextPrefix": "Entre no CALU Seu diário fica só na sua conta. A Calu estima. Vo",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "CALU — acompanhamento alimentar",
+      "hasCanvas": false,
+      "bodyTextLen": 157,
+      "bodyTextHash": "6a74635a185f24c17131f796ae1c6b69bade52db9720acb932f1049572d6cf9f",
+      "bodyTextPrefix": "Entre no CALU Seu diário fica só na sua conta. A Calu estima. Vo",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

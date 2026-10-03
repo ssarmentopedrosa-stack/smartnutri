@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", system-ui, sans-serif;
+  --font-display: "Fraunces", Georgia, serif;
+
+  --color-canvas: #e7dfd2;
+  --color-background: #f6f1e8;
+  --color-foreground: #241c16;
+  --color-card: #fffaf4;
+  --color-muted: #5e534a;
+  --color-subtle: #8a7b6e;
+  --color-border: #e3d8cb;
+  --color-primary: #8c3b22;
+  --color-primary-foreground: #fff8f4;
+  --color-water: #35536a;
+  --color-danger: #8d332c;
+  --color-ok: #2f5d45;
+}
+
+:root {
+  --motion-micro: 80ms;
+  --motion-quick: 150ms;
+  --motion-fast: 250ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  color-scheme: light;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-canvas);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  h1, h2, h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  input, textarea, select {
+    font: inherit;
+  }
+}
+
+.press {
+  transition: transform var(--motion-micro) var(--ease-out);
+}
+
+.press:active {
+  transform: scale(0.98);
+}
+
+.rise {
+  animation: rise var(--motion-fast) var(--ease-out);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.pulse-line {
+  animation: pulse-line 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse-line {
+  0%, 100% { transform: scaleX(0.35); opacity: 0.45; }
+  50% { transform: scaleX(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .press,
+  .rise,
+  .pulse-line {
+    animation: none;
+    transition: none;
+  }
+  .press:active {
+    transform: none;
+  }
+}
