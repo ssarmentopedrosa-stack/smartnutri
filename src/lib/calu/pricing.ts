@@ -45,6 +45,7 @@ const OPERATION_MAP: Record<string, AiOperation> = {
   analyzeText: "TEXT_FOOD_IDENTIFICATION",
   sendChat: "COACH",
   askInsight: "COACH",
+  dailyInsight: "COACH",
   weeklyCoach: "COACH",
   lookupBarcode: "FOOD_SEARCH_ASSIST",
 };

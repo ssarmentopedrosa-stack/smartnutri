@@ -5,7 +5,7 @@
 import { extractJson, parseAnalysis, type Analysis } from "./domain.ts";
 import { validateAiAnalysis } from "./ai-output.ts";
 import { COACH_JSON_HINT } from "./coach.ts";
-import { buildAnalysisUserText, fenceUntrusted } from "./prompts.ts";
+import { buildAnalysisUserText, DAILY_INSIGHT_PROMPT, fenceUntrusted } from "./prompts.ts";
 
 export const CALU_SYSTEM = `Você é Calu, uma assistente de acompanhamento alimentar.
 Sua função é ajudar o usuário a registrar, compreender e acompanhar seus hábitos alimentares.
@@ -202,6 +202,16 @@ function imageDataUrl(imageBase64: string): string {
   return `data:${mime};base64,${imageBase64}`;
 }
 
+export function splitImagePayload(url: string): { mime: "image/jpeg" | "image/png" | "image/webp"; data: string } {
+  const matched = url.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (matched) {
+    const raw = (matched[1] ?? "image/jpeg").toLowerCase();
+    const mime = raw === "image/jpg" ? "image/jpeg" : (raw as "image/jpeg" | "image/png" | "image/webp");
+    return { mime, data: (matched[2] ?? "").replace(/\s/g, "") };
+  }
+  return { mime: "image/jpeg", data: url.replace(/^data:image\/[a-z0-9.+-]+;base64,/i, "").replace(/\s/g, "") };
+}
+
 export class GrokProvider implements AIProvider {
   readonly name = "grok" as const;
 
@@ -237,10 +247,10 @@ export class GrokProvider implements AIProvider {
   async generateDailyInsight(context: string, options?: { minor?: boolean }): Promise<AiCall<string>> {
     const result = await grokComplete(
       [
-        { role: "system", content: systemPrompt(options?.minor) },
+        { role: "system", content: `${DAILY_INSIGHT_PROMPT}\n${systemPrompt(options?.minor)}` },
         {
           role: "user",
-          content: `Escreva um único insight curto sobre o dia alimentar abaixo. Sem julgamento, sem diagnóstico, sem nota.\n${fenceUntrusted("registros", context)}`,
+          content: `Interprete somente este JSON. Não some nutrientes e não invente números.\n${fenceUntrusted("dia", context)}`,
         },
       ],
       false,
@@ -298,8 +308,8 @@ async function geminiComplete(
       for (const part of message.content) {
         if (part.type === "text") parts.push({ text: part.text });
         else {
-          const data = part.image_url.url.replace(/^data:image\/jpeg;base64,/, "");
-          parts.push({ inline_data: { mime_type: "image/jpeg", data } });
+          const image = splitImagePayload(part.image_url.url);
+          parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
         }
       }
     }
@@ -378,8 +388,8 @@ export class GeminiProvider implements AIProvider {
   async generateDailyInsight(context: string, options?: { minor?: boolean }): Promise<AiCall<string>> {
     const result = await geminiComplete(
       [
-        { role: "system", content: systemPrompt(options?.minor) },
-        { role: "user", content: `Um insight curto, sem julgamento.\n${fenceUntrusted("registros", context)}` },
+        { role: "system", content: `${DAILY_INSIGHT_PROMPT}\n${systemPrompt(options?.minor)}` },
+        { role: "user", content: `Interprete somente este JSON. Não some nutrientes e não invente números.\n${fenceUntrusted("dia", context)}` },
       ],
       false,
       220,

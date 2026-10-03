@@ -47,8 +47,9 @@ import { normalizeOffProduct } from "./off";
 import { calculateNutrition } from "./nutrition";
 import { resolveFoodName } from "./resolver";
 import { preferStructuredSource } from "./search";
-import { parseBarcode, parseDay, parseEntityId, parseImageBase64, parseAge } from "./validation";
-import { isValidTimeZone, shiftDayKey } from "./timezone";
+import { parseBarcode, parseDay, parseEntityId, parseImageBase64, parseAge, parseNotificationEnabled, assertNotFutureDay } from "./validation";
+import { isValidTimeZone, shiftDayKey, dayKeyInTimeZone, hourInTimeZone } from "./timezone";
+import { buildDailyBoard, contextHash, foodRecordState, insightContext, parseDailyInsight, rescaleRecordedFood, type DailyBoard } from "./daily-board";
 import { getDailySummary, summarizeWindow, type DailySummary, type DayAgg } from "./longitudinal";
 import { fallbackCoach, parseCoach } from "./coach";
 import type { TokenUsage } from "./ai.server";
@@ -61,6 +62,37 @@ const FAIL = "Não consegui concluir isso agora. Tente de novo em instantes.";
 
 function dayOf(value: unknown): string {
   return parseDay(value);
+}
+
+async function rejectFuture(sql: Sql, userId: string, day: string): Promise<string> {
+  const rows = await sql<{ timezone: string }>`select timezone from profiles where user_id = ${userId}`;
+  const today = dayKeyInTimeZone(new Date(), rows[0]?.timezone || "America/Sao_Paulo");
+  return assertNotFutureDay(day, today);
+}
+
+function boardFor(
+  day: string,
+  hour: number,
+  qualitative: boolean,
+  meals: MealDTO[],
+  waterMl: number,
+  goals: (GoalTargets & { qualitative?: boolean }) | null,
+): DailyBoard {
+  const foods = meals.flatMap((meal) => meal.foods);
+  return buildDailyBoard({
+    day,
+    hour,
+    qualitative,
+    mealCount: meals.length,
+    calories: meals.reduce((sum, meal) => sum + Number(meal.calories ?? 0), 0),
+    protein: meals.reduce((sum, meal) => sum + Number(meal.protein ?? 0), 0),
+    carbohydrates: meals.reduce((sum, meal) => sum + Number(meal.carbohydrates ?? 0), 0),
+    fat: meals.reduce((sum, meal) => sum + Number(meal.fat ?? 0), 0),
+    fiber: meals.reduce((sum, meal) => sum + Number(meal.fiber ?? 0), 0),
+    waterMl,
+    targets: goals,
+    incompleteItems: foods.filter((food) => foodRecordState(food) !== "CONFIRMED").length,
+  });
 }
 
 function num(value: unknown): number | null {
@@ -533,6 +565,14 @@ export const getHome = createServerFn({ method: "POST" })
         habitsTotal,
         incomplete: meals.some((meal) => asBool(meal.incomplete)),
       });
+      const hour = hourInTimeZone(new Date(), profile?.timezone || "America/Sao_Paulo");
+      const waterMl = Math.round(Number(waterRows[0]?.total ?? 0));
+      const board = boardFor(data.day, hour, qualitative, meals, waterMl, goals);
+      const insightHash = contextHash(JSON.stringify(insightContext(board)));
+      const cachedRows = await sql<{ text: string; context_hash: string }>`
+        select text, context_hash from daily_insights where user_id = ${uid} and day = ${data.day}
+      `;
+      const cachedInsight = cachedRows[0]?.context_hash === insightHash ? cachedRows[0].text : null;
       return {
         ok: true as const,
         data: {
@@ -559,6 +599,8 @@ export const getHome = createServerFn({ method: "POST" })
           week: { lines: week.lines, recordedDays: week.recordedDays, sampleNote: week.sampleNote },
           microHabits,
           daily,
+          board,
+          cachedInsight,
         },
       };
     });
@@ -577,6 +619,8 @@ export type HomeData = {
   week?: { lines: string[]; recordedDays: number; sampleNote: string };
   microHabits?: { id: string; label: string }[];
   daily?: DailySummary;
+  board?: DailyBoard;
+  cachedInsight?: string | null;
 };
 
 export const saveProfile = createServerFn({ method: "POST" })
@@ -740,6 +784,7 @@ export const saveMeal = createServerFn({ method: "POST" })
     return quiet(async () => {
       const sql = await getSql();
       const uid = context.userId;
+      await rejectFuture(sql, uid, data.day);
       const totals = sumFoods(data.foods);
       const uncertaintyJson = JSON.stringify(data.uncertainties);
       await sql.transaction(async (tx) => {
@@ -800,6 +845,7 @@ export const duplicateMeal = createServerFn({ method: "POST" })
     return quiet(async () => {
       const sql = await getSql();
       const uid = context.userId;
+      await rejectFuture(sql, uid, data.day);
       const meals = await loadMeals(
         sql,
         uid,
@@ -831,6 +877,48 @@ export const duplicateMeal = createServerFn({ method: "POST" })
         );
       });
       return { ok: true as const, data: { mealId: id } };
+    });
+  });
+
+export const repeatFood = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((input: unknown) => {
+    const body = (input ?? {}) as Record<string, unknown>;
+    const quantity = Number(body.quantity);
+    const unit = String(body.unit ?? "g");
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 10000) throw new Error("Quantidade inválida.");
+    if (!UNITS.includes(unit as (typeof UNITS)[number])) throw new Error("Unidade inválida.");
+    const mealType = MEAL_TYPES.some((meal) => meal.id === body.mealType) ? (body.mealType as MealType) : "snack";
+    return { foodId: parseEntityId(body.foodId), day: dayOf(body.day), quantity, unit, mealType };
+  })
+  .handler(async ({ data, context }): Promise<Result<{ mealId: string }>> => {
+    return quiet(async () => {
+      const sql = await getSql();
+      const uid = context.userId;
+      await rejectFuture(sql, uid, data.day);
+      const rows = await sql<Record<string, unknown>>`
+        select * from food_items where id = ${data.foodId} and user_id = ${uid} limit 1
+      `;
+      const source = rows[0] ? mapFood(rows[0]) : null;
+      if (!source) return { ok: false, error: "Alimento não encontrado." };
+      const food = rescaleRecordedFood({ ...source, id: crypto.randomUUID() }, data.quantity, data.unit);
+      const mealId = crypto.randomUUID();
+      const totals = sumFoods([food]);
+      await sql.transaction(async (tx) => {
+        await tx`
+          insert into meals (
+            id, user_id, day, meal_type, eaten_at, source, note, uncertainties, insight,
+            calories, protein, carbohydrates, fat, fiber, incomplete
+          ) values (
+            ${mealId}, ${uid}, ${data.day}, ${data.mealType}, ${new Date().toISOString()}, ${"manual"},
+            ${""}, ${"[]"}, ${""},
+            ${totals.calories}, ${totals.protein}, ${totals.carbohydrates}, ${totals.fat}, ${totals.fiber},
+            ${totals.incomplete}
+          )
+        `;
+        await writeFoods(tx, uid, mealId, [food]);
+      });
+      return { ok: true as const, data: { mealId } };
     });
   });
 
@@ -977,12 +1065,13 @@ export const addWater = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((input: { day?: string; amountMl?: number }) => {
     const amount = Number(input?.amountMl);
-    if (![150, 200, 250, 350, 500].includes(amount)) throw new Error("Quantidade de água inválida.");
+    if (!Number.isInteger(amount) || amount < 50 || amount > 2000) throw new Error("Quantidade de água inválida.");
     return { day: dayOf(input?.day), amountMl: amount };
   })
   .handler(async ({ data, context }): Promise<Result<{ waterMl: number }>> => {
     return quiet(async () => {
       const sql = await getSql();
+      await rejectFuture(sql, context.userId, data.day);
       await sql`
         insert into water_logs (id, user_id, day, amount_ml) values (${crypto.randomUUID()}, ${context.userId}, ${data.day}, ${data.amountMl})
       `;
@@ -1003,6 +1092,7 @@ export const saveWeight = createServerFn({ method: "POST" })
   .handler(async ({ data, context }): Promise<Result<{ saved: true }>> => {
     return quiet(async () => {
       const sql = await getSql();
+      await rejectFuture(sql, context.userId, data.day);
       await sql.transaction(async (tx) => {
         const existing = await tx<{ id: string }>`
           select id from weight_logs where user_id = ${context.userId} and day = ${data.day} limit 1
@@ -1139,6 +1229,7 @@ export const toggleCheck = createServerFn({ method: "POST" })
   .handler(async ({ data, context }): Promise<Result<{ saved: true }>> => {
     return quiet(async () => {
       const sql = await getSql();
+      await rejectFuture(sql, context.userId, data.day);
       if (!["produce", "activity", "sleep"].includes(data.habit)) {
         const owned = await sql<{ id: string }>`
           select id from micro_habits where id = ${data.habit} and user_id = ${context.userId} and active = true
@@ -1157,7 +1248,7 @@ export const toggleCheck = createServerFn({ method: "POST" })
 
 export const setNotifications = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((enabled: boolean) => enabled === true)
+  .validator((enabled: unknown) => parseNotificationEnabled(enabled))
   .handler(async ({ data, context }): Promise<Result<{ enabled: boolean }>> => {
     return quiet(async () => {
       const sql = await getSql();
@@ -1602,16 +1693,45 @@ export const generateWeeklyCoach = createServerFn({ method: "POST" })
 export const askInsight = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((input: { day?: string }) => ({ day: dayOf(input?.day) }))
-  .handler(async ({ data, context }): Promise<Result<{ insight: string }>> => {
+  .handler(async ({ data, context }): Promise<Result<{ insight: string; source: "cache" | "ai" | "records" | "unavailable" }>> => {
     return quiet(async () => {
       const sql = await getSql();
-      const contextText = await diaryContext(sql, context.userId, data.day);
-      const result = await guardedAi(context.userId, "text", "askInsight", "dailyInsight", async (minor) => {
+      const uid = context.userId;
+      const profiles = await sql<ProfileRow>`select * from profiles where user_id = ${uid}`;
+      const profile = profiles[0] ? mapProfile(profiles[0]) : null;
+      const goalRows = await sql<GoalRow>`select * from goals where user_id = ${uid}`;
+      const goals = goalRows[0] ? mapGoals(goalRows[0]) : null;
+      const meals = await loadMeals(sql, uid, data.day);
+      const waterRows = await sql<{ total: number }>`
+        select coalesce(sum(amount_ml), 0)::float as total from water_logs where user_id = ${uid} and day = ${data.day}
+      `;
+      const qualitative = Boolean(goals?.qualitative || (profile?.age != null && profile.age < 18));
+      const hour = hourInTimeZone(new Date(), profile?.timezone || "America/Sao_Paulo");
+      const board = boardFor(data.day, hour, qualitative, meals, Math.round(Number(waterRows[0]?.total ?? 0)), goals);
+      const payload = insightContext(board);
+      const hash = contextHash(JSON.stringify(payload));
+      const cached = await sql<{ text: string; context_hash: string }>`
+        select text, context_hash from daily_insights where user_id = ${uid} and day = ${data.day}
+      `;
+      if (cached[0]?.context_hash === hash) {
+        return { ok: true as const, data: { insight: cached[0].text, source: "cache" as const } };
+      }
+      const result = await guardedAi(uid, "text", "askInsight", "dailyInsight", async (minor) => {
         const { getAIProvider } = await import("./ai.server");
-        const call = await getAIProvider().generateDailyInsight(contextText, { minor });
+        const call = await getAIProvider().generateDailyInsight(JSON.stringify(payload), { minor });
         return { value: call.value, usage: call.usage };
       });
-      if (!result.ok) return result;
-      return { ok: true as const, data: { insight: result.data } };
+      if (!result.ok) {
+        if (/limite|Muitas tentativas/i.test(result.error)) return result;
+        return { ok: true as const, data: { insight: "CALU está indisponível no momento.", source: "unavailable" as const } };
+      }
+      const parsed = parseDailyInsight(result.data);
+      if (!parsed) return { ok: true as const, data: { insight: board.note, source: "records" as const } };
+      await sql`
+        insert into daily_insights (user_id, day, context_hash, text)
+        values (${uid}, ${data.day}, ${hash}, ${parsed})
+        on conflict (user_id, day) do update set context_hash = excluded.context_hash, text = excluded.text, created_at = now()
+      `;
+      return { ok: true as const, data: { insight: parsed, source: "ai" as const } };
     });
   });

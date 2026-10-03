@@ -48,7 +48,7 @@ Produção é `CALU_ENV=production`, `VERCEL_ENV=production`, ou `NODE_ENV=produ
 
 ## Banco e migrations
 
-Arquivos em `migrations/`, em ordem, cada um numa transação. Não edite migrations já aplicadas. A V2.1 está em `migrations/0003_v21.sql`. A V2.2 está em `migrations/0004_v22.sql` (versão de preço, tokens totais, tipo de erro e índice da janela de rate limit). Os dois arquivos podem ser aplicados de novo sem apagar dado.
+Arquivos em `migrations/`, em ordem, cada um numa transação. Não edite migrations já aplicadas. A V2.1 está em `migrations/0003_v21.sql`. A V2.2 está em `migrations/0004_v22.sql` (versão de preço, tokens totais, tipo de erro e índice da janela de rate limit). A V3.1 está em `migrations/0005_v31.sql` (`daily_insights`, cache do olhar do dia). Os arquivos podem ser aplicados de novo sem apagar dado.
 
 ```bash
 npm run db:migrate
@@ -94,7 +94,7 @@ npm run build
 - [ ] `BETTER_AUTH_SECRET`
 - [ ] `BETTER_AUTH_URL`
 - [ ] provedor de IA no servidor, se a análise for ligada
-- [ ] migrations aplicadas, inclusive `0004_v22.sql`
+- [ ] migrations aplicadas, inclusive `0004_v22.sql` e `0005_v31.sql`
 - [ ] PostgreSQL, não PGLite
 - [ ] E2E do fluxo crítico
 - [ ] logs sem segredo, foto ou prompt
@@ -124,4 +124,21 @@ Fotos não são gravadas.
 - O “hoje” da quota usa o fuso IANA do perfil, não UTC puro.
 
 O plano premium só vale com uma linha ativa em `subscriptions`. `profiles.plan` não é a fonte de cobrança. Não há pagamento nesta versão. A cota mensal em código é só o teto diário vezes 30, para o servidor — o cliente não escolhe o plano.
+
+## CALU V3.1 — Smart Daily Experience
+
+O diário (`/diario`) é o painel do dia. Os totais saem das refeições já gravadas e de `calculateNutrition`. A IA não soma caloria nem macro.
+
+- Resumo: calorias, proteína, carboidrato, gordura, fibra e água. Com meta numérica, mostra consumido, restante e percentual. Sem meta, ou para menor de 18 anos, o texto é “meta não configurada”. Nada é inventado como zero no lugar da meta.
+- Refeições agrupadas pelo tipo já existente. Dá para atualizar a quantidade, repetir um alimento (`repeatFood`), repetir a refeição no dia aberto (`duplicateMeal`), trocar por outro item real da TACO (`suggestSubstitutes`) e excluir com confirmação.
+- Água: +200, +300, +500 ml, ou um inteiro entre 50 e 2000 ml.
+- Registro incompleto: `CONFIRMED`, `NEEDS_CONFIRMATION`, `PARTIAL`, `UNKNOWN`. Sem caloria, não há botão de confirmar. Open Food Facts incompleto avisa que algumas informações não estão disponíveis.
+- Porções em `src/lib/calu/portions.ts`. Sem base, a unidade não vira grama. Colher de chá continua sem conversão.
+- Data futura é recusada no servidor para refeição, alimento repetido, água, peso e hábito. A mensagem é “Data futura não pode ser registrada.” O “hoje” usa o fuso do perfil.
+- Notificações aceitam exatamente `true` ou `false`.
+- “Pedir um olhar da Calu” chama `askInsight` uma vez, com `guardedAi` (quota, rate limit, custo). O contexto é JSON do dia, sem nome, e-mail ou foto. A resposta passa por `parseDailyInsight`. O cache é `daily_insights`, chave usuário + dia + hash do contexto. Se a IA falhar, o diário continua e o bloco mostra “CALU está indisponível no momento.” Ou a nota local, se o texto for inválido. Quota e rate limit ainda aparecem como erro.
+- Offline: TACO, água, registro manual e o histórico já carregado seguem. IA e Open Food Facts precisam de rede.
+
+O dia seguinte fica bloqueado na navegação quando o dia visto é hoje ou posterior. O cálculo do exemplo 150 g de arroz tipo 1 + 100 g de feijão carioca + 120 g de frango grelhado está no teste `v31.test.ts`, via `resolveFoodName` e `calculateNutrition`.
+
 

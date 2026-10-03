@@ -84,6 +84,32 @@ test("fluxos críticos E01–E25", { timeout: 240_000 }, async () => {
     await page.getByRole("button", { name: "+200 ml" }).click();
     await page.getByText("0,2").waitFor();
 
+    await page.getByRole("link", { name: "Diário" }).click();
+    await page.getByRole("heading", { name: "Resumo do dia" }).waitFor();
+    assert.match(await page.locator("body").innerText(), new RegExp(food));
+    assert.equal(await page.getByRole("button", { name: "Dia seguinte" }).isDisabled(), true);
+    const meal = page.locator("li", { hasText: food }).first();
+    await meal.getByRole("button").first().click();
+    await meal.locator("input[name='quantity']").fill("150");
+    await meal.getByRole("button", { name: "Atualizar" }).click();
+    await page.getByText("Alimento atualizado").waitFor();
+    await meal.getByRole("button", { name: "Repetir", exact: true }).click();
+    await page.getByText("Alimento repetido").waitFor();
+    await meal.getByRole("button", { name: "Repetir refeição", exact: true }).click();
+    await page.getByText("Refeição repetida").waitFor();
+    assert.equal(await page.getByRole("button", { name: "Pedir um olhar da Calu" }).isVisible(), true);
+
+    await page.goto(`${base}/registrar?modo=codigo`);
+    await page.getByRole("button", { name: "Cadastrar manualmente" }).click();
+    await page.getByRole("button", { name: "Confirmar refeição" }).click();
+    await page.getByText("A refeição entrou no seu dia.").waitFor();
+    await page.getByRole("button", { name: "Abrir diário" }).click();
+    const partial = page.locator("li", { hasText: "Produto" }).first();
+    await partial.getByText("Produto").waitFor();
+    await partial.getByRole("button").first().click();
+    await partial.getByText("Atenção: este registro precisa ser confirmado.").waitFor();
+    assert.equal(await partial.getByRole("button", { name: "Confirmar" }).count(), 0);
+
     await page.getByRole("link", { name: "Progresso" }).click();
     await page.getByRole("heading", { name: "Progresso" }).waitFor();
     await page.getByPlaceholder("kg").fill("70");
@@ -104,6 +130,16 @@ test("fluxos críticos E01–E25", { timeout: 240_000 }, async () => {
     await page.getByRole("combobox", { name: /Fuso horário/ }).selectOption("America/Fortaleza");
     await page.getByRole("button", { name: "Salvar perfil" }).click();
     await page.getByText("Perfil atualizado.").waitFor();
+    await page.getByRole("checkbox", { name: "Lembretes", exact: true }).check();
+    await page.waitForTimeout(500);
+    await page.reload();
+    await page.getByRole("heading", { name: "Notificações" }).waitFor();
+    assert.equal(await page.getByRole("checkbox", { name: "Lembretes", exact: true }).isChecked(), true);
+    await page.getByRole("checkbox", { name: "Lembretes", exact: true }).uncheck();
+    await page.waitForTimeout(500);
+    await page.reload();
+    await page.getByRole("heading", { name: "Notificações" }).waitFor();
+    assert.equal(await page.getByRole("checkbox", { name: "Lembretes", exact: true }).isChecked(), false);
 
     await page.goto(`${base}/registrar?modo=texto`);
     await page.getByRole("heading", { name: "O que você comeu?" }).waitFor();

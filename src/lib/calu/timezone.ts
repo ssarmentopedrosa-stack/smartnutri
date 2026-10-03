@@ -35,6 +35,16 @@ export function dayKeyInTimeZone(date: Date, timeZone: string): string {
   return `${year}-${month}-${day}`;
 }
 
+export function hourInTimeZone(date: Date, timeZone: string): number {
+  const zone = isValidTimeZone(timeZone) ? timeZone : "America/Sao_Paulo";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    hour: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value ?? "12");
+  return Number.isFinite(hour) ? hour : 12;
+}
 export function shiftDayKey(day: string, delta: number): string {
   const date = new Date(`${day}T12:00:00Z`);
   date.setUTCDate(date.getUTCDate() + delta);

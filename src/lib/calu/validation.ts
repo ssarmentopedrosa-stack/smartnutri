@@ -7,7 +7,10 @@ export function parseAge(value: unknown): number | null {
   return age;
 }
 
-/** Recusa dia de calendário inexistente (já em parseDay) e dia posterior ao informado. */
+export function parseNotificationEnabled(value: unknown): boolean {
+  if (value === true || value === false) return value;
+  throw new Error("Informe se as notificações ficam ligadas ou desligadas.");
+}
 export function assertNotFutureDay(day: string, today: string): string {
   const parsed = parseDay(day);
   const current = parseDay(today);

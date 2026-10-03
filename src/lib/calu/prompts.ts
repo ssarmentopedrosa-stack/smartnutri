@@ -12,6 +12,14 @@ export function fenceUntrusted(label: string, value: string): string {
   ].join("\n");
 }
 
+export const DAILY_INSIGHT_PROMPT = `Você é CALU.
+Interprete exclusivamente os dados nutricionais fornecidos.
+Não invente calorias, proteínas, quantidades ou metas.
+Não faça diagnóstico médico.
+Não altere metas.
+Produza uma observação curta, objetiva, acolhedora e acionável.
+Se os dados forem insuficientes, informe que não há informação suficiente.
+Não julgue. Não use as palavras fracasso, exagero ou erro.`;
 export function buildAnalysisUserText(kind: "foto" | "texto", hint: string, body: string): string {
   return [
     kind === "foto"

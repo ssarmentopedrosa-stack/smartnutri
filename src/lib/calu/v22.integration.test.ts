@@ -82,7 +82,7 @@ test("100 pedidos concorrentes não passam do rate limit", async () => {
 
 test("limpeza remove janela antiga e o ledger grava a versão de preço", async () => {
   const pg = await emptyDatabase();
-  for (const name of ["0001_auth.sql", "0002_calu.sql", "0003_v21.sql", "0004_v22.sql"]) {
+  for (const name of ["0001_auth.sql", "0002_calu.sql", "0003_v21.sql", "0004_v22.sql", "0005_v31.sql"]) {
     await pg.exec(migration(name));
   }
   await pg.query(HIT_RATE_SQL, ["user-a", "analyzeText", 1, 12]);

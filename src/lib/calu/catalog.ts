@@ -3,8 +3,11 @@ import { makeFood, type FoodDraft } from "./domain.ts";
 import { calculateNutrition, toGrams } from "./nutrition.ts";
 import { searchFoods } from "./search.ts";
 
-export function searchTaco(query: string): TacoFood[] {
-  return searchFoods(query).map((hit) => hit.food);
+export function suggestSubstitutes(name: string, limit = 3): TacoFood[] {
+  const hits = searchFoods(name);
+  const topId = hits[0]?.food.id;
+  const next = hits.filter((hit) => hit.food.id !== topId && hit.food.kcal != null).slice(0, limit);
+  return next.map((hit) => hit.food);
 }
 
 export function foodFromTaco(
