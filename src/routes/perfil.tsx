@@ -2,10 +2,12 @@ import { createFileRoute, Link, Navigate, useNavigate } from "@tanstack/react-ro
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { UserButton } from "@/lib/auth/gates";
+import { signOut } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import {
   addMemory,
   askInsight,
+  deleteAccount,
   deleteAccountData,
   deleteHistory,
   deleteMemory,
@@ -40,7 +42,7 @@ function ProfileBody({ day }: { day: string }) {
   const [goals, setGoals] = useState({ calories: "", protein: "", carbohydrates: "", fat: "", fiber: "", waterMl: "" });
   const [fact, setFact] = useState("");
   const [insight, setInsight] = useState("");
-  const [confirm, setConfirm] = useState<"history" | "account" | null>(null);
+  const [confirm, setConfirm] = useState<"history" | "data" | "account" | null>(null);
 
   useEffect(() => {
     void track({ data: "subscription_screen_opened" }).catch(() => undefined);
@@ -60,6 +62,7 @@ function ProfileBody({ day }: { day: string }) {
         dietNote: profile.dietNote,
         restrictions: profile.restrictions,
         consent: true,
+        timezone: profile.timezone,
       });
       if (result.data.goals) {
         const g = result.data.goals;
@@ -78,6 +81,7 @@ function ProfileBody({ day }: { day: string }) {
   if (!home) return <Boot />;
   if (!home.profile) return <Navigate to="/comecar" />;
 
+  const minor = (home.profile.age != null && home.profile.age < 18) || Boolean(home.goals?.qualitative);
   const estimate = estimateGoals(toProfilePayload(form, true));
 
   return (
@@ -101,8 +105,12 @@ function ProfileBody({ day }: { day: string }) {
       </div>
 
       <section className="mt-10">
-        <h2 className="font-display text-2xl font-medium">Metas</h2>
+        <h2 className="font-display text-2xl font-medium">{minor ? "Acompanhamento" : "Referência diária estimada"}</h2>
         <p className="mt-1 text-sm text-muted">{estimate.note}</p>
+        {minor ? (
+          <p className="mt-3 text-sm">Hidratação de referência: {estimate.targets.waterMl} ml. Sem número de calorias como meta.</p>
+        ) : (
+          <>
         <div className="mt-4 grid grid-cols-2 gap-3">
           {(
             [
@@ -139,7 +147,7 @@ function ProfileBody({ day }: { day: string }) {
                       waterMl: String(g.waterMl),
                     });
                   }
-                  toast.success("Metas reestimadas.");
+                  toast.success("Referência atualizada.");
                 }
               })
             }
@@ -158,12 +166,14 @@ function ProfileBody({ day }: { day: string }) {
                   fiber: Number(goals.fiber),
                   waterMl: Number(goals.waterMl),
                 },
-              }).then((result) => toast[result.ok ? "success" : "error"](result.ok ? "Metas salvas." : result.error))
+              }).then((result) => toast[result.ok ? "success" : "error"](result.ok ? "Referência salva por você." : result.error))
             }
           >
-            Salvar metas
+            Salvar referência
           </Button>
         </div>
+          </>
+        )}
       </section>
 
       <section className="mt-10">
@@ -298,26 +308,50 @@ function ProfileBody({ day }: { day: string }) {
             Excluir histórico alimentar
           </Button>
         )}
+        {confirm === "data" ? (
+          <Button
+            variant="danger"
+            className="w-full"
+            onClick={() =>
+              void deleteAccountData().then((result) => {
+                if (!result.ok) toast.error(result.error);
+                else {
+                  toast.success("Dados apagados. A conta de acesso continua.");
+                  setConfirm(null);
+                  void navigate({ to: "/comecar" });
+                }
+              })
+            }
+          >
+            Apagar meus dados agora
+          </Button>
+        ) : (
+          <Button variant="ghost" className="w-full" onClick={() => setConfirm("data")}>
+            Apagar meus dados
+          </Button>
+        )}
         {confirm === "account" ? (
           <Button
             variant="danger"
             className="w-full"
             onClick={() =>
-              void deleteAccountData().then(async (result) => {
+              void deleteAccount().then(async (result) => {
                 if (!result.ok) toast.error(result.error);
-                else await navigate({ to: "/comecar" });
+                else {
+                  await signOut("/login");
+                }
               })
             }
           >
-            Apagar dados do CALU
+            Excluir minha conta agora
           </Button>
         ) : (
           <Button variant="ghost" className="w-full" onClick={() => setConfirm("account")}>
-            Excluir dados da conta
+            Excluir minha conta
           </Button>
         )}
         <p className="text-xs text-subtle">
-          Apagar os dados remove perfil, diário, memória e conversas deste app. O acesso da conta pode permanecer no provedor de login.
+          Apagar meus dados remove diário, perfil nutricional, memória e conversas, e mantém o login. Excluir a conta também remove a identidade de acesso neste aplicativo.
         </p>
         <p className="text-sm">
           <Link to="/privacidade" className="underline">

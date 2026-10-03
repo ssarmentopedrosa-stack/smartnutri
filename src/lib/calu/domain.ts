@@ -85,6 +85,11 @@ export type FoodDraft = {
   baseCarbohydrates: number | null;
   baseFat: number | null;
   baseFiber: number | null;
+  nutritionSource?: "TACO" | "OPEN_FOOD_FACTS" | "USER_CONFIRMED" | "AI_ESTIMATE";
+  identificationConfidence?: number | null;
+  portionConfidence?: number | null;
+  nutritionConfidence?: number | null;
+  review?: "high" | "medium" | "low";
 };
 
 export type Macros = {
@@ -114,13 +119,34 @@ export const AI_LIMITS: Record<PlanId, { image: number; text: number; chat: numb
 
 export const ANALYTICS_EVENTS = [
   "app_open",
+  "onboarding_started",
   "onboarding_completed",
-  "meal_created",
+  "photo_started",
+  "photo_completed",
+  "photo_failed",
   "photo_analysis_started",
   "photo_analysis_completed",
-  "voice_meal_created",
+  "meal_created",
+  "meal_edited",
+  "meal_deleted",
+  "food_corrected",
+  "portion_corrected",
+  "barcode_used",
+  "goal_viewed",
+  "goal_changed",
+  "progress_viewed",
+  "weekly_summary_viewed",
+  "chat_started",
+  "chat_completed",
   "ai_chat_started",
+  "habit_created",
+  "habit_completed",
+  "subscription_viewed",
   "subscription_screen_opened",
+  "checkout_started",
+  "subscription_started",
+  "subscription_cancelled",
+  "voice_meal_created",
 ] as const;
 
 export type AnalyticsEvent = (typeof ANALYTICS_EVENTS)[number];
@@ -275,6 +301,23 @@ export function makeFood(partial: {
   });
 }
 
+export function routeConfidence(
+  identification: number | null,
+  portion: number | null,
+): "high" | "medium" | "low" {
+  const id = identification ?? 0.4;
+  const portionScore = portion ?? 0.4;
+  if (id >= 0.85 && portionScore >= 0.8) return "high";
+  if (id < 0.55 || portionScore < 0.5) return "low";
+  return "medium";
+}
+
+export const LEGAL_VERSIONS = {
+  consent: "2026-10-03",
+  terms: "2026-10-03",
+  privacy: "2026-10-03",
+} as const;
+
 export function estimateGoals(input: {
   age: number | null;
   sex: SexId;
@@ -282,19 +325,31 @@ export function estimateGoals(input: {
   weightKg: number | null;
   goal: GoalId;
   activity: ActivityId;
-}): { targets: GoalTargets; note: string; personal: boolean } {
+}): { targets: GoalTargets; note: string; personal: boolean; qualitative: boolean; audience: "adult" | "minor" | "insufficient" } {
   const { age, heightCm, weightKg } = input;
+  if (age != null && age < 18) {
+    const waterMl = age < 14 ? 1600 : 2000;
+    return {
+      targets: { calories: 0, protein: 0, carbohydrates: 0, fat: 0, fiber: 0, waterMl },
+      personal: false,
+      qualitative: true,
+      audience: "minor",
+      note: "Para menores de 18 anos a Calu não calcula meta calórica adulta nem déficit. O acompanhamento é o registro, a hidratação, os hábitos e a orientação de um responsável ou profissional quando necessário.",
+    };
+  }
   if (
     age == null ||
     heightCm == null ||
     weightKg == null ||
-    age < 13 ||
+    age < 18 ||
     heightCm < 120 ||
     weightKg < 30
   ) {
     return {
       targets: GENERIC_GOALS,
       personal: false,
+      qualitative: false,
+      audience: "insufficient",
       note: "Sem idade, altura e peso suficientes, usamos uma referência genérica. Não é uma meta pessoal e não substitui orientação profissional.",
     };
   }
@@ -326,10 +381,12 @@ export function estimateGoals(input: {
   const floored = raw < CALORIE_FLOOR;
   return {
     personal: true,
+    qualitative: false,
+    audience: "adult",
     targets: { calories, protein, carbohydrates, fat, fiber, waterMl },
     note: floored
-      ? "Estimativa pela equação de Mifflin-St Jeor e pelo seu objetivo. O valor foi limitado para não sugerir uma ingestão muito baixa. Não substitui orientação profissional."
-      : "Estimativa pela equação de Mifflin-St Jeor e pelo seu objetivo. Não substitui orientação profissional.",
+      ? "Referência diária estimada pela equação de Mifflin-St Jeor e pelo seu objetivo. O valor foi limitado para não sugerir uma ingestão muito baixa. Não substitui orientação profissional."
+      : "Referência diária estimada pela equação de Mifflin-St Jeor e pelo seu objetivo. Não substitui orientação profissional.",
   };
 }
 
@@ -495,6 +552,9 @@ type RawFood = {
   quantity?: unknown;
   unit?: unknown;
   confidence?: unknown;
+  identificationConfidence?: unknown;
+  portionConfidence?: unknown;
+  preparation?: unknown;
   calories?: unknown;
   protein?: unknown;
   carbohydrates?: unknown;
@@ -572,8 +632,9 @@ export function parseAnalysis(raw: unknown, hour = 12): Analysis | null {
     const quantity = numOrNull(item.estimatedQuantity ?? item.quantity) ?? 1;
     const unit = UNITS.includes(String(item.unit) as Unit) ? String(item.unit) : "g";
     const confidence = numOrNull(item.confidence);
-    foods.push(
-      makeFood({
+    const identification = numOrNull(item.identificationConfidence ?? item.confidence);
+    const portion = numOrNull(item.portionConfidence ?? item.confidence);
+    const draft = makeFood({
         id: crypto.randomUUID(),
         name,
         quantity,
@@ -587,8 +648,15 @@ export function parseAnalysis(raw: unknown, hour = 12): Analysis | null {
         confidence: confidence == null ? null : Math.max(0, Math.min(1, confidence)),
         source: "ai",
         dataStatus: numOrNull(item.calories) == null ? "unavailable" : "estimate",
-      }),
-    );
+      });
+    foods.push({
+      ...draft,
+      identificationConfidence: identification == null ? null : Math.max(0, Math.min(1, identification)),
+      portionConfidence: portion == null ? null : Math.max(0, Math.min(1, portion)),
+      nutritionSource: "AI_ESTIMATE",
+      nutritionConfidence: numOrNull(item.calories) == null ? 0 : 0.35,
+      review: routeConfidence(identification, portion),
+    });
   }
   const uncertainties = Array.isArray(body.uncertainties)
     ? body.uncertainties.map((u) => String(u).trim()).filter(Boolean).slice(0, 6)

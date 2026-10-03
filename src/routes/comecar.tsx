@@ -1,8 +1,8 @@
 import { createFileRoute, Navigate, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
-import { saveProfile } from "@/lib/calu/api";
+import { saveProfile, track } from "@/lib/calu/api";
 import { friendlyError } from "@/lib/calu/client";
 import { Boot, Button, Mark, Screen } from "@/components/calu/chrome";
 import { ProfileFields, emptyProfileForm, toProfilePayload } from "@/components/calu/profile-form";
@@ -35,6 +35,9 @@ function StartPage() {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState(() => emptyProfileForm());
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void track({ data: "onboarding_started" }).catch(() => undefined);
+  }, []);
 
   if (isPending) return <Boot />;
   if (!user) return <Navigate to="/login" />;

@@ -1,5 +1,7 @@
 import { Minus, Plus, Trash2 } from "lucide-react";
 import { MEAL_TYPES, UNITS, formatQty, macroLine, mealLabel, quantityStep, sumFoods, withQuantity, commitDraft, type FoodDraft, type MealType } from "@/lib/calu/domain";
+import { applyPortionPreset } from "@/lib/calu/nutrition";
+import { nutritionSourceLabel } from "@/lib/calu/pipeline";
 import { Button, controlClass } from "./chrome";
 
 export function MealEditor({
@@ -49,12 +51,10 @@ export function MealEditor({
                 <div className="min-w-0">
                   <h3 className="font-medium">{food.name}</h3>
                   <p className="text-sm text-muted">
-                    {food.dataStatus === "estimate"
-                      ? "Estimativa"
-                      : food.dataStatus === "reference"
-                        ? "Referência"
-                        : "Dados não disponíveis"}
-                    {food.confidence != null ? ` · confiança ${Math.round(food.confidence * 100)}%` : ""}
+                    {nutritionSourceLabel(food.nutritionSource, food.dataStatus)}
+                    {food.review === "high" ? " · Identificação com alta confiança." : ""}
+                    {food.review === "medium" ? " · Quantidade estimada." : ""}
+                    {food.review === "low" ? " · Preciso confirmar uma informação." : ""}
                   </p>
                 </div>
                 <button
@@ -110,7 +110,32 @@ export function MealEditor({
                   ))}
                 </select>
               </label>
+              {food.review === "low" ? (
+                <div className="mt-3">
+                  <p className="text-sm text-muted">Acho que a porção pode variar. Você confirma?</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                  {(
+                    [
+                      ["pequena", "Pequena"],
+                      ["media", "Média"],
+                      ["grande", "Grande"],
+                    ] as const
+                  ).map(([preset, label]) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      className="h-10 rounded-full border border-border px-3 text-sm"
+                      onClick={() => update(food.id, applyPortionPreset(food, preset))}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                  </div>
+                  <p className="mt-2 text-xs text-subtle">Ou informe a quantidade no campo acima.</p>
+                </div>
+              ) : null}
               <p className="mt-3 text-sm tabular-nums text-muted">
+                {food.dataStatus === "estimate" || food.nutritionSource === "AI_ESTIMATE" ? "~" : ""}
                 {macroLine(food.calories, "kcal")} · P {macroLine(food.protein, "g")} · C{" "}
                 {macroLine(food.carbohydrates, "g")} · G {macroLine(food.fat, "g")}
               </p>
@@ -130,7 +155,7 @@ export function MealEditor({
 
       <div className="rounded-3xl bg-foreground px-4 py-4 text-background">
         <p className="text-sm text-background/70">{mealLabel(mealType)}</p>
-        <p className="mt-1 font-display text-3xl tabular-nums">{totals.calories} kcal</p>
+        <p className="mt-1 font-display text-3xl tabular-nums">~{totals.calories} kcal</p>
         <p className="mt-1 text-sm text-background/80">
           Proteína {macroLine(totals.incomplete && totals.protein === 0 ? null : totals.protein, "g")} · Carboidrato{" "}
           {totals.carbohydrates} g · Gordura {totals.fat} g · Fibras {totals.fiber} g

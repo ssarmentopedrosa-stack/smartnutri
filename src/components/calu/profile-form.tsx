@@ -1,4 +1,5 @@
 import { ACTIVITIES, DIETS, GOALS, type ActivityId, type DietId, type GoalId, type SexId } from "@/lib/calu/domain";
+import { COMMON_TIMEZONES } from "@/lib/calu/timezone";
 import { Field, controlClass } from "./chrome";
 
 export type ProfileFormValue = {
@@ -13,6 +14,7 @@ export type ProfileFormValue = {
   dietNote: string;
   restrictions: string;
   consent: boolean;
+  timezone: string;
 };
 
 export const emptyProfileForm = (): ProfileFormValue => ({
@@ -27,7 +29,17 @@ export const emptyProfileForm = (): ProfileFormValue => ({
   dietNote: "",
   restrictions: "",
   consent: false,
+  timezone: detectedZone(),
 });
+
+function detectedZone(): string {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone || "America/Sao_Paulo";
+  } catch {
+    return "America/Sao_Paulo";
+  }
+}
 
 export function ProfileFields({
   value,
@@ -64,6 +76,15 @@ export function ProfileFields({
           <input className={controlClass} inputMode="decimal" value={value.weightKg} onChange={(e) => set({ weightKg: e.target.value })} />
         </Field>
       </div>
+      <Field label="Fuso horário">
+        <select className={controlClass} value={value.timezone} onChange={(e) => set({ timezone: e.target.value })}>
+          {[...new Set([value.timezone, ...COMMON_TIMEZONES])].map((zone) => (
+            <option key={zone} value={zone}>
+              {zone}
+            </option>
+          ))}
+        </select>
+      </Field>
       <Field label="Objetivo">
         <select className={controlClass} value={value.goal} onChange={(e) => set({ goal: e.target.value as GoalId })}>
           {GOALS.map((goal) => (
@@ -104,8 +125,10 @@ export function ProfileFields({
           placeholder="A Calu não infere alergias."
         />
       </Field>
-      {Number(value.age) > 0 && Number(value.age) < 16 ? (
-        <p className="text-sm text-muted">O CALU é pensado para adultos. Menores devem usar com um responsável.</p>
+      {Number(value.age) > 0 && Number(value.age) < 18 ? (
+        <p className="text-sm text-muted">
+          Para menores de 18 anos não calculamos meta calórica adulta nem déficit. O acompanhamento é o registro, a água e os hábitos, de preferência com um responsável.
+        </p>
       ) : null}
       {showConsent ? (
         <label className="flex items-start gap-3 text-sm leading-5">
@@ -138,5 +161,6 @@ export function toProfilePayload(value: ProfileFormValue, recalculate: boolean) 
     restrictions: value.restrictions,
     consent: value.consent,
     recalculate,
+    timezone: value.timezone,
   };
 }

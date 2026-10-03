@@ -1,4 +1,5 @@
 import { pendingMigrations } from "../../scripts/migration-plan.mjs";
+import { resolveDbBackend } from "./calu/db-policy";
 
 /** Which database backend is active. */
 export type DbSource = "neon" | "pglite";
@@ -10,13 +11,24 @@ const rawDatabaseUrl =
 const databaseUrl =
   rawDatabaseUrl && rawDatabaseUrl.trim() ? rawDatabaseUrl : undefined;
 
+const dbDecision = resolveDbBackend({
+  nodeEnv: typeof process !== "undefined" ? process.env.NODE_ENV : undefined,
+  databaseUrl,
+  vercelEnv: typeof process !== "undefined" ? process.env.VERCEL_ENV : undefined,
+  grokProjectId: typeof process !== "undefined" ? process.env.GROK_PROJECT_ID : undefined,
+  vercel: typeof process !== "undefined" ? process.env.VERCEL : undefined,
+  caluEnv: typeof process !== "undefined" ? process.env.CALU_ENV : undefined,
+});
+
+const dbBlockReason = dbDecision.source === "error" ? dbDecision.message : null;
+
 /**
  * Active backend: real **Neon** when `DATABASE_URL` is set (deployed / configured
  * sandbox), otherwise a local embedded **PGLite** (Postgres compiled to WASM) so
  * the app has a working database even with nothing configured — the live preview
- * included. Swap in Neon later by just setting `DATABASE_URL`; no code changes.
+ * included. Production deploys without DATABASE_URL fail closed.
  */
-export const dbSource: DbSource = databaseUrl ? "neon" : "pglite";
+export const dbSource: DbSource = dbDecision.source === "neon" ? "neon" : "pglite";
 
 /**
  * Minimal shared SQL surface, satisfied by both Neon and PGLite. Both the
@@ -35,6 +47,7 @@ export interface Sql {
     text: string,
     params?: unknown[],
   ): Promise<T[]>;
+  transaction<T>(fn: (tx: Sql) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -70,7 +83,7 @@ const identity = (v: string) => v;
 type Run = <T>(text: string, params: unknown[]) => Promise<T[]>;
 
 /** Wrap a query runner in the tagged-template + `.query()` `Sql` surface. */
-function toSql(run: Run): Sql {
+function toSql(run: Run, transaction: Sql["transaction"]): Sql {
   const sql = (async <T = Record<string, unknown>>(
     strings: TemplateStringsArray,
     ...values: unknown[]
@@ -82,6 +95,7 @@ function toSql(run: Run): Sql {
   }) as unknown as Sql;
   sql.query = <T = Record<string, unknown>>(text: string, params: unknown[] = []) =>
     run<T>(text, params);
+  sql.transaction = transaction;
   return sql;
 }
 
@@ -94,10 +108,38 @@ function createNeonSql(): Promise<Sql> {
     types.setTypeParser(OID_DATE, identity);
     types.setTypeParser(OID_INTERVAL, identity);
     const pool = new Pool({ connectionString: databaseUrl });
-    return toSql(async <T>(text: string, params: unknown[]) => {
-      const res = await pool.query(text, params);
-      return res.rows as T[];
-    });
+    const base = toSql(
+      async <T>(text: string, params: unknown[]) => {
+        const res = await pool.query(text, params);
+        return res.rows as T[];
+      },
+      async (fn) => {
+        const client = await pool.connect();
+        const tx = toSql(
+          async <T>(text: string, params: unknown[]) => {
+            const res = await client.query(text, params);
+            return res.rows as T[];
+          },
+          async (inner) => inner(tx),
+        );
+        try {
+          await client.query("BEGIN");
+          const result = await fn(tx);
+          await client.query("COMMIT");
+          return result;
+        } catch (error) {
+          try {
+            await client.query("ROLLBACK");
+          } catch {
+            /* a conexão já pode ter caído */
+          }
+          throw error;
+        } finally {
+          client.release();
+        }
+      },
+    );
+    return base;
   })().catch((err) => {
     globalRef.__pgSqlPromise__ = undefined;
     throw err;
@@ -161,10 +203,26 @@ async function createPgliteSql(): Promise<Sql> {
   globalRef.__pgliteMigrateChain__ = pass;
   await pass;
 
-  return toSql(async <T>(text: string, params: unknown[]) => {
-    const result = await pg.query<T>(text, params);
-    return result.rows;
-  });
+  return toSql(
+    async <T>(text: string, params: unknown[]) => {
+      const result = await pg.query<T>(text, params);
+      return result.rows;
+    },
+    async (fn) => {
+      let value!: Awaited<ReturnType<typeof fn>>;
+      await pg.transaction(async (tx) => {
+        const txSql = toSql(
+          async <T>(text: string, params: unknown[]) => {
+            const result = await tx.query<T>(text, params);
+            return result.rows;
+          },
+          async (inner) => inner(txSql),
+        );
+        value = await fn(txSql);
+      });
+      return value;
+    },
+  );
 }
 
 let sqlPromise: Promise<Sql> | null = null;
@@ -176,6 +234,7 @@ async function createSql(): Promise<Sql> {
         "or a server route loader, never from client code.",
     );
   }
+  if (dbBlockReason) throw new Error(dbBlockReason);
   return dbSource === "neon" ? createNeonSql() : createPgliteSql();
 }
 
@@ -200,6 +259,7 @@ export function getSql(): Promise<Sql> {
  * Kysely dialect). Throws when `DATABASE_URL` is set (that path uses Neon).
  */
 export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite> {
+  if (dbBlockReason) throw new Error(dbBlockReason);
   if (dbSource !== "pglite") {
     throw new Error("getPglite() is only available on the PGLite fallback (no DATABASE_URL)");
   }
@@ -220,6 +280,7 @@ export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite
  * module kick it off immediately (see bottom of file).
  */
 export function ensureDbReady(): Promise<void> {
+  if (dbBlockReason) return Promise.reject(new Error(dbBlockReason));
   if (dbSource !== "pglite") return Promise.resolve();
   return getSql().then(() => undefined);
 }
@@ -229,7 +290,7 @@ export function ensureDbReady(): Promise<void> {
 const globalBoot = globalThis as typeof globalThis & {
   __pgBootstrapPromise__?: Promise<void>;
 };
-if (typeof window === "undefined" && dbSource === "pglite") {
+if (typeof window === "undefined" && !dbBlockReason && dbSource === "pglite") {
   globalBoot.__pgBootstrapPromise__ ??= ensureDbReady().catch((err) => {
     globalBoot.__pgBootstrapPromise__ = undefined;
     console.error("[db] PGLite bootstrap failed:", err);

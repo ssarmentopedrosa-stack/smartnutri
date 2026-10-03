@@ -26,10 +26,10 @@ function HomePage() {
   useEffect(() => setDay(todayKey()), []);
   if (isPending || !day) return <Boot />;
   if (!user) return <Navigate to="/login" />;
-  return <HomeBody day={day} />;
+  return <HomeBody day={day} userId={user.id} onDay={setDay} />;
 }
 
-function HomeBody({ day }: { day: string }) {
+function HomeBody({ day, userId, onDay }: { day: string; userId: string; onDay: (day: string) => void }) {
   const navigate = useNavigate();
   const [home, setHome] = useState<HomeData | null>(null);
   const [offline, setOffline] = useState(false);
@@ -38,11 +38,11 @@ function HomeBody({ day }: { day: string }) {
 
   async function load() {
     try {
-      const queue = readQueue();
+      const queue = readQueue(userId);
       for (const meal of queue) {
         try {
           const saved = await saveMeal({ data: meal });
-          if (saved.ok) dropQueued(meal.id);
+          if (saved.ok) dropQueued(userId, meal.id);
         } catch (err) {
           if (isOfflineError(err)) break;
         }
@@ -50,7 +50,7 @@ function HomeBody({ day }: { day: string }) {
       const result = await getHome({ data: { day } });
       if (!result.ok) {
         setError(result.error);
-        const cached = readCachedHome<HomeData>(day);
+        const cached = readCachedHome<HomeData>(userId, day);
         if (cached) {
           setHome(cached);
           setOffline(true);
@@ -58,11 +58,11 @@ function HomeBody({ day }: { day: string }) {
         return;
       }
       setHome(result.data);
-      cacheHome(day, result.data);
+      cacheHome(userId, day, result.data);
       setOffline(false);
       setError("");
     } catch (err) {
-      const cached = readCachedHome<HomeData>(day);
+      const cached = readCachedHome<HomeData>(userId, day);
       if (cached) {
         setHome(cached);
         setOffline(true);
@@ -79,12 +79,20 @@ function HomeBody({ day }: { day: string }) {
       void track({ data: "app_open" }).catch(() => undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day]);
+  }, [day, userId]);
+
+  useEffect(() => {
+    const zone = home?.profile?.timezone;
+    if (!zone) return;
+    const zoned = todayKey(new Date(), zone);
+    if (zoned !== day) onDay(zoned);
+  }, [home?.profile?.timezone, day, onDay]);
 
   if (loading) return <Boot />;
   if (!home?.profile) return <Navigate to="/comecar" />;
 
-  const goals = home.goals ?? { ...FALLBACK_GOALS, isEstimate: true };
+  const goals = home.goals ?? { ...FALLBACK_GOALS, isEstimate: true, qualitative: false, source: "AI_ESTIMATE" };
+  const minor = (home.profile.age != null && home.profile.age < 18) || Boolean(home.goals?.qualitative);
   const foods = home.meals.flatMap((meal) => meal.foods);
   const totals = foods.length
     ? sumFoods(foods)
@@ -129,6 +137,16 @@ function HomeBody({ day }: { day: string }) {
         {error && !offline ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
 
         <section className="mt-6 rounded-3xl border border-border bg-card p-4">
+          {minor ? (
+            <div>
+              <p className="text-sm text-muted">Acompanhamento qualitativo</p>
+              <p className="mt-2 text-sm leading-6">
+                Sem meta calórica automática. Hoje há {home.meals.length} refeição(ões) registrada(s)
+                {home.meals.length ? ` · ~${Math.round(totals.calories)} kcal anotadas` : ""}. Água: {home.waterMl} ml.
+              </p>
+            </div>
+          ) : (
+            <>
           <Meter label="Calorias" value={totals.calories} goal={goals.calories} unit="kcal" />
           <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-4">
             <Meter label="Proteína" value={totals.protein} goal={goals.protein} unit="g" />
@@ -136,6 +154,8 @@ function HomeBody({ day }: { day: string }) {
             <Meter label="Gorduras" value={totals.fat} goal={goals.fat} unit="g" />
             <Meter label="Fibras" value={totals.fiber} goal={goals.fiber} unit="g" />
           </div>
+            </>
+          )}
           <div className="mt-4">
             <Meter
               label="Água"
@@ -153,10 +173,21 @@ function HomeBody({ day }: { day: string }) {
             </div>
           </div>
           {totals.incomplete ? <p className="mt-3 text-xs text-subtle">Parte do dia está sem dados completos. O total é parcial.</p> : null}
-          {goals.isEstimate ? (
-            <p className="mt-3 text-xs text-subtle">Metas estimadas. Não substituem orientação profissional.</p>
+          {goals.isEstimate && !minor ? (
+            <p className="mt-3 text-xs text-subtle">Referência diária estimada. Não é uma meta obrigatória e não substitui orientação profissional.</p>
           ) : null}
         </section>
+
+        {home.week?.lines?.length ? (
+          <section className="mt-4 rounded-3xl bg-card px-4 py-4">
+            <h2 className="font-display text-xl font-medium">O que percebi esta semana</h2>
+            <ul className="mt-2 space-y-2 text-sm leading-6">
+              {home.week.lines.slice(0, 3).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
 
         <section className="mt-4 rounded-3xl bg-card px-4 py-4">
           <p className="text-sm leading-6">{insight}</p>
@@ -183,6 +214,7 @@ function HomeBody({ day }: { day: string }) {
         </p>
 
         <h2 className="mt-8 font-display text-2xl font-medium">Hoje</h2>
+        {home.daily ? <p className="mt-1 text-sm text-muted">{home.daily.completeness}</p> : null}
         {home.meals.length === 0 ? (
           <p className="mt-2 text-sm text-muted">Nada registrado ainda. Uma refeição já organiza o dia.</p>
         ) : (
@@ -195,7 +227,7 @@ function HomeBody({ day }: { day: string }) {
                 >
                   <div className="flex items-baseline justify-between gap-3">
                     <span className="font-medium">{mealLabel(meal.mealType)}</span>
-                    <span className="tabular-nums text-sm text-muted">{Math.round(meal.calories)} kcal</span>
+                    <span className="tabular-nums text-sm text-muted">~{Math.round(meal.calories)} kcal</span>
                   </div>
                   <p className="mt-1 truncate text-sm text-muted">{meal.foods.map((food) => food.name).join(", ")}</p>
                 </Link>

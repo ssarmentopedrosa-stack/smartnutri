@@ -132,7 +132,7 @@ var HEADERS = { TSS_SHELL: "X-TSS_SHELL" };
 * the dev styles URL for route-scoped CSS collection.
 */
 async function getStartManifest(matchedRoutes) {
-	const { tsrStartManifest } = await import("../_tanstack-start-manifest_v-XcpRMNNR.mjs");
+	const { tsrStartManifest } = await import("../_tanstack-start-manifest_v-B-oOeO6T.mjs");
 	const startManifest = tsrStartManifest();
 	let routes = startManifest.routes;
 	routes[rootRouteId];
@@ -154,99 +154,111 @@ async function getStartManifest(matchedRoutes) {
 var manifest = {
 	"06348902c8c2db6aa00281fe572ac30d439785ef11474bb9f989bd9a5ca33f04": {
 		functionName: "toggleCheck_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"1ab172087df397cc2924de8a8862ee1a61d1ce3c8563fa141090508044932658": {
 		functionName: "deleteHistory_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"31ff68b6de2671c50bced77530ec16530a1815e954ab66bc42e6c9ee3a2f8187": {
 		functionName: "analyzeText_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
+	},
+	"361255684f2487dc76a4ef2617d25fdc742496cefd4b3e5243e51cdf66a55140": {
+		functionName: "generateWeeklyCoach_createServerFn_handler",
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
+	},
+	"3707df74847020797d8365173fdca26d906e2e771f8b40888a62ab56ec5cc584": {
+		functionName: "acceptMicroHabit_createServerFn_handler",
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"3c5c7a9a46e5022fd5f2fee92ca419ecbcedd14c5fc60de70c206faf9f2e72aa": {
 		functionName: "analyzePhoto_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"43917d76dcfbb027d0640d34a85935282ce01c0a70e99cf875fe496e7c41efdb": {
 		functionName: "addMemory_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"457be820c823fbb22e98a3594b12d27b28b942789eddd5333cab7a32d2510903": {
 		functionName: "addWater_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"4917af8ac2c61611754490b57c54d91265ff5947bcf2fcb497734e5bae64239c": {
 		functionName: "deleteMemory_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"4e7979d168c0c61a61777db323cf398ad8393c73b713ada910a84730334f4e6f": {
 		functionName: "getProgress_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"6bf6c8657e27577c1da84cffdf2551317dc94d234edf56f8fe06b9c028559e8a": {
 		functionName: "exportData_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"879b76dba7f5395f602c92fafd0e377957082cd5c110c96278a1e1fc0d4cef3e": {
 		functionName: "askInsight_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
+	},
+	"8a03ac1838a7a6eef6e58d66bf12c2b8ffc9b451fa282afdb1355f755b218f74": {
+		functionName: "deleteAccount_createServerFn_handler",
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"8f9fa1a5d2c2e7469da2d9e53dbc9f76437ad77017bc8c792a777cb48e08805a": {
 		functionName: "listChat_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"949850fd6aceff9a9274e572271e1fb5f836c09c6923b27c1471547f990d4380": {
 		functionName: "getHome_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"960780eaed2bc7aa6821f6a1cb8025a2c74351e3af8043d32b54ccdf3d501967": {
 		functionName: "saveGoals_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"9ef3f457c8abde30f02b125cc4934d6d6df82b2dc016d94f2e600faa86007cf9": {
 		functionName: "duplicateMeal_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"a857c794d0f985709d325a7be67a932ebb00acf8264407e38dde0265c207da33": {
 		functionName: "saveHabits_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"aec5c69a5f0da4881994a88fb34a6db94fc4acb48517ead9c7f57091f611525f": {
 		functionName: "saveWeight_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"bb1063cb51e5401bfaf8536563a233b5e531757b1c9dfd622c8ea22acc316827": {
 		functionName: "deleteAccountData_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"c55390699d82cd3ab2d04eac7446cca28b70c1c3fff85836dd90f785bdce943e": {
 		functionName: "track_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"cdd68d43665309a34e797baf86f25cc5793581f0624db4871bfbbeaaa7fa3cfe": {
 		functionName: "lookupBarcode_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"d2d9636a5a2552f197994ff5c881ff9a675c438f24a58832784859c6893e76f6": {
 		functionName: "setNotifications_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"d60afee2617786c0d60773f05ff548572a644237fa9c03ae8c61be68939960d8": {
 		functionName: "deleteMeal_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"dec1ea4da53b10a3e1c6dc2d17c6bf76d7b86d8010ce7366fe04d331516965e8": {
 		functionName: "saveMeal_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"e2dedb0307ed957a23fe7af5f265c1af94527322d26de8091d5fa2884f207b83": {
 		functionName: "sendChat_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	},
 	"ef04d8fd72b5e6a7436e9e10e9f0c05419ea544c3ba26da156243927c89c3b44": {
 		functionName: "saveProfile_createServerFn_handler",
-		importer: () => import("./api-lu10EjeV.mjs")
+		importer: () => import("./api-B_xaOrbA.mjs").then((n) => n.t)
 	}
 };
 async function getServerFnById(id, access) {
@@ -1651,7 +1663,7 @@ var getBaseManifest = getProdBaseManifest;
 var createEarlyHintsForRequest = createEarlyHintsCollector;
 async function loadEntries() {
 	const [routerEntry, startEntry, pluginAdapters] = await Promise.all([
-		import("./router-BW7X0Qi2.mjs").then((n) => n.t),
+		import("./router-Cm7k6Ped.mjs").then((n) => n.t),
 		import("./start-5Z2QO8AU.mjs"),
 		import("./empty-plugin-adapters-D9UWiqvJ.mjs")
 	]);

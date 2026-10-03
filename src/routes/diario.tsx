@@ -87,7 +87,7 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
                       <button type="button" className="w-full text-left" onClick={() => setOpen(expanded ? null : meal.id)}>
                         <div className="flex items-baseline justify-between gap-3">
                           <span className="font-medium">{mealLabel(meal.mealType)}</span>
-                          <span className="tabular-nums text-sm">{Math.round(meal.calories)} kcal</span>
+                          <span className="tabular-nums text-sm">~{Math.round(meal.calories)} kcal</span>
                         </div>
                         <p className="mt-1 text-sm text-muted">
                           {clock} · {Math.round(meal.protein)} g proteína

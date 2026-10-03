@@ -1,7 +1,8 @@
+import { dayKeyInTimeZone, isValidTimeZone } from "./timezone.ts";
 import type { FoodDraft } from "./domain";
 
-const QUEUE = "calu.queue.v1";
-const CACHE = "calu.cache.v1";
+const QUEUE = "calu.queue.v2";
+const CACHE = "calu.cache.v2";
 
 export type MealPayload = {
   id: string;
@@ -15,11 +16,23 @@ export type MealPayload = {
   foods: FoodDraft[];
 };
 
-export function todayKey(date = new Date()): string {
+export function todayKey(date = new Date(), timeZone?: string): string {
+  if (timeZone && isValidTimeZone(timeZone)) return dayKeyInTimeZone(date, timeZone);
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
+}
+
+/** Remove diário e fila locais. O banco continua sendo a fonte de verdade. */
+export function clearPrivateCache(): void {
+  try {
+    localStorage.removeItem(QUEUE);
+    localStorage.removeItem(CACHE);
+    sessionStorage.removeItem("calu.open");
+  } catch {
+    /* ambiente sem storage */
+  }
 }
 
 export function shiftDay(day: string, delta: number): string {
@@ -41,46 +54,52 @@ export function isOfflineError(error: unknown): boolean {
   return /failed to fetch|network|offline|load failed|sem conexão/i.test(msg);
 }
 
-export function readQueue(): MealPayload[] {
+export function readQueue(userId: string): MealPayload[] {
   try {
     const raw = localStorage.getItem(QUEUE);
-    const parsed = raw ? (JSON.parse(raw) as MealPayload[]) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = raw ? (JSON.parse(raw) as { userId?: string; meals?: MealPayload[] }) : null;
+    if (!parsed || parsed.userId !== userId || !Array.isArray(parsed.meals)) return [];
+    return parsed.meals;
   } catch {
     return [];
   }
 }
 
-export function enqueueMeal(meal: MealPayload) {
-  const queue = readQueue().filter((item) => item.id !== meal.id);
+export function enqueueMeal(userId: string, meal: MealPayload) {
+  const queue = readQueue(userId).filter((item) => item.id !== meal.id);
   queue.push(meal);
-  localStorage.setItem(QUEUE, JSON.stringify(queue));
+  localStorage.setItem(QUEUE, JSON.stringify({ userId, meals: queue }));
 }
 
-export function dropQueued(id: string) {
-  localStorage.setItem(QUEUE, JSON.stringify(readQueue().filter((item) => item.id !== id)));
+export function dropQueued(userId: string, id: string) {
+  localStorage.setItem(QUEUE, JSON.stringify({ userId, meals: readQueue(userId).filter((item) => item.id !== id) }));
 }
 
-export function cacheHome(day: string, data: unknown) {
+export function cacheHome(userId: string, day: string, data: unknown) {
   try {
-    const current = JSON.parse(localStorage.getItem(CACHE) || "{}") as Record<string, unknown>;
-    current[day] = data;
-    localStorage.setItem(CACHE, JSON.stringify(current));
+    const current = JSON.parse(localStorage.getItem(CACHE) || "{}") as { userId?: string; days?: Record<string, unknown> };
+    const days = current.userId === userId ? (current.days ?? {}) : {};
+    days[day] = data;
+    localStorage.setItem(CACHE, JSON.stringify({ userId, days }));
   } catch {
     /* cache cheio ou indisponível */
   }
 }
 
-export function readCachedHome<T>(day: string): T | null {
+export function readCachedHome<T>(userId: string, day: string): T | null {
   try {
-    const current = JSON.parse(localStorage.getItem(CACHE) || "{}") as Record<string, T>;
-    return current[day] ?? null;
+    const current = JSON.parse(localStorage.getItem(CACHE) || "{}") as { userId?: string; days?: Record<string, T> };
+    if (current.userId !== userId) return null;
+    return current.days?.[day] ?? null;
   } catch {
     return null;
   }
 }
 
 export function compressImage(file: File): Promise<string> {
+  if (file.size > 8_000_000) {
+    return Promise.reject(new Error("Essa foto é grande demais. Tente outra mais próxima, em JPG."));
+  }
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const image = new Image();

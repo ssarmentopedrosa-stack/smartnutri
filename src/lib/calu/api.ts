@@ -7,14 +7,17 @@ import {
   ANALYTICS_EVENTS,
   DIETS,
   GOALS,
+  LEGAL_VERSIONS,
   UNITS,
   asksMemory,
   estimateGoals,
+  extractJson,
   makeFood,
   mealLabel,
   memoryCommand,
   safetyReply,
   sumFoods,
+  withQuantity,
   type ActivityId,
   type AnalyticsEvent,
   type DietId,
@@ -26,6 +29,26 @@ import {
   type SexId,
   MEAL_TYPES,
 } from "./domain";
+import { enrichAnalysis } from "./pipeline";
+import { logEvent, newRequestId } from "./observe";
+import {
+  effectivePlan,
+  findOwnedMeal,
+  hitRateLimit,
+  isMinorUser,
+  quotaDay,
+  recordAiCall,
+  releaseQuota,
+  reserveQuota,
+  wipeAuthIdentity,
+  wipeUserData,
+} from "./ops";
+import { normalizeOffProduct } from "./off";
+import { parseBarcode, parseDay, parseEntityId, parseImageBase64 } from "./validation";
+import { isValidTimeZone, shiftDayKey } from "./timezone";
+import { getDailySummary, summarizeWindow, type DailySummary, type DayAgg } from "./longitudinal";
+import { fallbackCoach, parseCoach } from "./coach";
+import type { TokenUsage } from "./ai.server";
 
 type Ok<T> = { ok: true; data: T };
 type Err = { ok: false; error: string };
@@ -34,9 +57,7 @@ type Result<T> = Ok<T> | Err;
 const FAIL = "Não consegui concluir isso agora. Tente de novo em instantes.";
 
 function dayOf(value: unknown): string {
-  const day = String(value ?? "");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("Data inválida.");
-  return day;
+  return parseDay(value);
 }
 
 function num(value: unknown): number | null {
@@ -72,7 +93,7 @@ async function quiet<T>(fn: () => Promise<T>): Promise<T | Err> {
     if (error instanceof Error && error.message && error.message.length < 180 && !/sql|postgres|duplicate/i.test(error.message)) {
       return { ok: false, error: error.message };
     }
-    console.error("calu_request_failed");
+    console.error(JSON.stringify({ event: "calu_request_failed" }));
     return { ok: false, error: FAIL };
   }
 }
@@ -91,6 +112,10 @@ type ProfileRow = {
   restrictions: string | null;
   plan: string;
   consent_at: unknown;
+  timezone?: string | null;
+  consent_version?: string | null;
+  terms_version?: string | null;
+  privacy_version?: string | null;
 };
 
 export type ProfileDTO = {
@@ -106,6 +131,10 @@ export type ProfileDTO = {
   restrictions: string;
   plan: PlanId;
   consentAt: string | null;
+  timezone: string;
+  consentVersion: string | null;
+  termsVersion: string | null;
+  privacyVersion: string | null;
 };
 
 function mapProfile(row: ProfileRow): ProfileDTO {
@@ -126,6 +155,10 @@ function mapProfile(row: ProfileRow): ProfileDTO {
     restrictions: row.restrictions ?? "",
     plan: row.plan === "premium" ? "premium" : "free",
     consentAt: row.consent_at ? iso(row.consent_at) : null,
+    timezone: row.timezone && isValidTimeZone(row.timezone) ? row.timezone : "America/Sao_Paulo",
+    consentVersion: row.consent_version ?? null,
+    termsVersion: row.terms_version ?? null,
+    privacyVersion: row.privacy_version ?? null,
   };
 }
 
@@ -137,9 +170,11 @@ type GoalRow = {
   fiber: number;
   water_ml: number;
   is_estimate: unknown;
+  source?: string | null;
+  qualitative?: unknown;
 };
 
-function mapGoals(row: GoalRow): GoalTargets & { isEstimate: boolean } {
+function mapGoals(row: GoalRow): GoalTargets & { isEstimate: boolean; qualitative: boolean; source: string } {
   return {
     calories: Math.round(Number(row.calories)),
     protein: Number(row.protein),
@@ -148,6 +183,8 @@ function mapGoals(row: GoalRow): GoalTargets & { isEstimate: boolean } {
     fiber: Number(row.fiber),
     waterMl: Math.round(Number(row.water_ml)),
     isEstimate: asBool(row.is_estimate),
+    qualitative: asBool(row.qualitative),
+    source: row.source === "USER_DEFINED" || row.source === "QUALITATIVE" ? row.source : "AI_ESTIMATE",
   };
 }
 
@@ -175,6 +212,12 @@ function mapFood(row: Record<string, unknown>): FoodDraft {
     baseCarbohydrates: num(row.base_carbohydrates),
     baseFat: num(row.base_fat),
     baseFiber: num(row.base_fiber),
+    nutritionSource: (["TACO", "OPEN_FOOD_FACTS", "USER_CONFIRMED", "AI_ESTIMATE"].includes(String(row.nutrition_source))
+      ? String(row.nutrition_source)
+      : undefined) as FoodDraft["nutritionSource"],
+    identificationConfidence: num(row.identification_confidence),
+    portionConfidence: num(row.portion_confidence),
+    nutritionConfidence: num(row.nutrition_confidence),
   };
 }
 
@@ -259,8 +302,10 @@ function parseFoods(input: unknown): FoodDraft[] {
     const unit = UNITS.includes(food.unit as (typeof UNITS)[number]) ? String(food.unit) : "g";
     const quantity = num(food.quantity);
     if (quantity == null || quantity <= 0 || quantity > 10000) throw new Error("Quantidade inválida.");
+    const rawId = String(food.id ?? "");
+    const id = /^[0-9a-f-]{16,40}$/i.test(rawId) ? rawId : crypto.randomUUID();
     const draft = makeFood({
-      id: String(food.id || crypto.randomUUID()),
+      id,
       name,
       quantity,
       unit,
@@ -283,8 +328,21 @@ function parseFoods(input: unknown): FoodDraft[] {
     draft.baseCarbohydrates = num(food.baseCarbohydrates);
     draft.baseFat = num(food.baseFat);
     draft.baseFiber = num(food.baseFiber);
+    draft.nutritionSource = (["TACO", "OPEN_FOOD_FACTS", "USER_CONFIRMED", "AI_ESTIMATE"].includes(String(food.nutritionSource))
+      ? food.nutritionSource
+      : food.source === "taco"
+        ? "TACO"
+        : food.source === "barcode"
+          ? "OPEN_FOOD_FACTS"
+          : food.source === "user"
+            ? "USER_CONFIRMED"
+            : "AI_ESTIMATE") as FoodDraft["nutritionSource"];
+    draft.identificationConfidence = num(food.identificationConfidence);
+    draft.portionConfidence = num(food.portionConfidence);
+    draft.nutritionConfidence = num(food.nutritionConfidence);
+    draft.review = food.review === "high" || food.review === "medium" || food.review === "low" ? food.review : undefined;
     void index;
-    return draft;
+    return withQuantity(draft, draft.quantity);
   });
 }
 
@@ -292,16 +350,21 @@ async function writeFoods(sql: Sql, userId: string, mealId: string, foods: FoodD
   await sql`delete from food_items where meal_id = ${mealId} and user_id = ${userId}`;
   for (let i = 0; i < foods.length; i++) {
     const food = foods[i]!;
+    const clash = await sql<{ id: string }>`select id from food_items where id = ${food.id} limit 1`;
+    const id = clash[0] ? crypto.randomUUID() : food.id;
     await sql`
       insert into food_items (
         id, meal_id, user_id, name, quantity, unit, calories, protein, carbohydrates, fat, fiber,
         confidence, source, data_status, base_quantity, base_calories, base_protein, base_carbohydrates,
-        base_fat, base_fiber, position, updated_at
+        base_fat, base_fiber, nutrition_source, identification_confidence, portion_confidence,
+        nutrition_confidence, position, updated_at
       ) values (
-        ${food.id}, ${mealId}, ${userId}, ${food.name}, ${food.quantity}, ${food.unit},
+        ${id}, ${mealId}, ${userId}, ${food.name}, ${food.quantity}, ${food.unit},
         ${food.calories}, ${food.protein}, ${food.carbohydrates}, ${food.fat}, ${food.fiber},
         ${food.confidence}, ${food.source}, ${food.dataStatus}, ${food.baseQuantity}, ${food.baseCalories},
-        ${food.baseProtein}, ${food.baseCarbohydrates}, ${food.baseFat}, ${food.baseFiber}, ${i}, now()
+        ${food.baseProtein}, ${food.baseCarbohydrates}, ${food.baseFat}, ${food.baseFiber},
+        ${food.nutritionSource ?? "AI_ESTIMATE"}, ${food.identificationConfidence ?? null},
+        ${food.portionConfidence ?? null}, ${food.nutritionConfidence ?? null}, ${i}, now()
       )
     `;
   }
@@ -320,6 +383,7 @@ type ProfileInput = {
   restrictions: string;
   consent: boolean;
   recalculate: boolean;
+  timezone: string;
 };
 
 function parseProfile(input: unknown): ProfileInput {
@@ -352,6 +416,7 @@ function parseProfile(input: unknown): ProfileInput {
     restrictions: String(body.restrictions ?? "").trim().slice(0, 240),
     consent: body.consent === true,
     recalculate: body.recalculate === true,
+    timezone: isValidTimeZone(String(body.timezone ?? "")) ? String(body.timezone) : "America/Sao_Paulo",
   };
 }
 
@@ -394,12 +459,80 @@ export const getHome = createServerFn({ method: "POST" })
       const memory = await sql<{ id: string; fact: string }>`
         select id, fact from ai_memory where user_id = ${uid} order by created_at desc limit 30
       `;
+      const usageDay = await quotaDay(sql, uid);
       const usageRows = await sql<{ image_count: number; text_count: number; chat_count: number }>`
-        select image_count, text_count, chat_count from ai_usage where user_id = ${uid} and day = ${data.day}
+        select image_count, text_count, chat_count from ai_usage where user_id = ${uid} and day = ${usageDay}
       `;
       const prefs = await sql<{ enabled: unknown }>`select enabled from notification_prefs where user_id = ${uid}`;
       const usage = usageRows[0] ?? { image_count: 0, text_count: 0, chat_count: 0 };
-      const plan = profile?.plan ?? "free";
+      const plan = await effectivePlan(sql, uid);
+      if (profile) profile.plan = plan;
+      const weekStart = shiftDayKey(data.day, -6);
+      const weekMeals = await sql<DayAgg>`
+        select day, count(*)::float as meals,
+          coalesce(sum(calories), 0)::float as calories,
+          coalesce(sum(protein), 0)::float as protein,
+          coalesce(sum(carbohydrates), 0)::float as carbohydrates,
+          coalesce(sum(fat), 0)::float as fat,
+          coalesce(sum(fiber), 0)::float as fiber
+        from meals
+        where user_id = ${uid} and day >= ${weekStart} and day <= ${data.day}
+        group by day
+      `;
+      const weekWater = await sql<{ day: string; ml: number }>`
+        select day, coalesce(sum(amount_ml), 0)::float as ml from water_logs
+        where user_id = ${uid} and day >= ${weekStart} and day <= ${data.day}
+        group by day
+      `;
+      const weekWeights = await sql<{ day: string; kg: number }>`
+        select day, weight_kg as kg from weight_logs
+        where user_id = ${uid} and day >= ${weekStart} and day <= ${data.day}
+        order by day asc
+      `;
+      const weekChecks = await sql<{ day: string; done: unknown }>`
+        select day, done from habit_checks where user_id = ${uid} and day >= ${weekStart} and day <= ${data.day}
+      `;
+      const qualitative = Boolean(goals?.qualitative || (profile?.age != null && profile.age < 18));
+      const week = summarizeWindow({
+        span: 7,
+        mealsByDay: weekMeals.map((row) => ({
+          day: String(row.day),
+          meals: Number(row.meals),
+          calories: Number(row.calories),
+          protein: Number(row.protein),
+          carbohydrates: Number(row.carbohydrates),
+          fat: Number(row.fat),
+          fiber: Number(row.fiber),
+        })),
+        waterByDay: weekWater.map((row) => ({ day: row.day, ml: Number(row.ml) })),
+        weights: weekWeights.map((row) => ({ day: row.day, kg: Number(row.kg) })),
+        habitChecks: weekChecks.map((row) => ({ day: String(row.day), done: asBool(row.done) })),
+        goals: goals ? { protein: goals.protein, fiber: goals.fiber, waterMl: goals.waterMl } : null,
+        qualitative,
+      });
+      const microHabits = await sql<{ id: string; label: string }>`
+        select id, label from micro_habits where user_id = ${uid} and active = true order by created_at desc limit 12
+      `;
+      const weightToday = await sql<{ kg: number }>`
+        select weight_kg as kg from weight_logs where user_id = ${uid} and day = ${data.day} order by updated_at desc limit 1
+      `;
+      const habitFlags = habitRows[0]
+        ? [habitRows[0].water, habitRows[0].produce, habitRows[0].meals, habitRows[0].activity, habitRows[0].sleep]
+        : [true, false, true, false, false];
+      const habitsTotal = habitFlags.filter((flag) => asBool(flag)).length + microHabits.length;
+      const daily = getDailySummary({
+        meals: meals.length,
+        calories: meals.reduce((sum, meal) => sum + Number(meal.calories ?? 0), 0),
+        protein: meals.reduce((sum, meal) => sum + Number(meal.protein ?? 0), 0),
+        carbohydrates: meals.reduce((sum, meal) => sum + Number(meal.carbohydrates ?? 0), 0),
+        fat: meals.reduce((sum, meal) => sum + Number(meal.fat ?? 0), 0),
+        fiber: meals.reduce((sum, meal) => sum + Number(meal.fiber ?? 0), 0),
+        waterMl: Math.round(Number(waterRows[0]?.total ?? 0)),
+        weightKg: weightToday[0] ? Number(weightToday[0].kg) : null,
+        habitsDone: checks.filter((check) => asBool(check.done)).length,
+        habitsTotal,
+        incomplete: meals.some((meal) => asBool(meal.incomplete)),
+      });
       return {
         ok: true as const,
         data: {
@@ -423,6 +556,9 @@ export const getHome = createServerFn({ method: "POST" })
             chat: Number(usage.chat_count ?? 0),
             limits: AI_LIMITS[plan],
           },
+          week: { lines: week.lines, recordedDays: week.recordedDays, sampleNote: week.sampleNote },
+          microHabits,
+          daily,
         },
       };
     });
@@ -430,7 +566,7 @@ export const getHome = createServerFn({ method: "POST" })
 
 export type HomeData = {
   profile: ProfileDTO | null;
-  goals: (GoalTargets & { isEstimate: boolean }) | null;
+  goals: (GoalTargets & { isEstimate: boolean; qualitative: boolean; source: string }) | null;
   meals: MealDTO[];
   waterMl: number;
   habits: { water: boolean; produce: boolean; meals: boolean; activity: boolean; sleep: boolean };
@@ -438,6 +574,9 @@ export type HomeData = {
   memory: { id: string; fact: string }[];
   notifications: boolean;
   usage: { image: number; text: number; chat: number; limits: { image: number; text: number; chat: number } };
+  week?: { lines: string[]; recordedDays: number; sampleNote: string };
+  microHabits?: { id: string; label: string }[];
+  daily?: DailySummary;
 };
 
 export const saveProfile = createServerFn({ method: "POST" })
@@ -451,47 +590,58 @@ export const saveProfile = createServerFn({ method: "POST" })
       if (!existing[0] && !data.consent) {
         return { ok: false, error: "É preciso aceitar a política e os termos para criar o perfil." };
       }
-      if (existing[0]) {
-        await sql`
-          update profiles set
-            name = ${data.name}, age = ${data.age}, sex = ${data.sex}, height_cm = ${data.heightCm},
-            weight_kg = ${data.weightKg}, goal = ${data.goal}, activity = ${data.activity}, diet = ${data.diet},
-            diet_note = ${data.dietNote}, restrictions = ${data.restrictions}, updated_at = now()
-          where user_id = ${uid}
-        `;
-      } else {
-        await sql`
-          insert into profiles (
-            user_id, name, age, sex, height_cm, weight_kg, goal, activity, diet, diet_note, restrictions, consent_at
-          ) values (
-            ${uid}, ${data.name}, ${data.age}, ${data.sex}, ${data.heightCm}, ${data.weightKg},
-            ${data.goal}, ${data.activity}, ${data.diet}, ${data.dietNote}, ${data.restrictions}, now()
-          )
-        `;
-        await trackEvent(sql, uid, "onboarding_completed");
-      }
-      const goalRows = await sql`select user_id from goals where user_id = ${uid}`;
-      if (!goalRows[0] || data.recalculate) {
-        const estimated = estimateGoals(data);
-        await sql`
-          insert into goals (user_id, calories, protein, carbohydrates, fat, fiber, water_ml, is_estimate, updated_at)
-          values (
-            ${uid}, ${estimated.targets.calories}, ${estimated.targets.protein}, ${estimated.targets.carbohydrates},
-            ${estimated.targets.fat}, ${estimated.targets.fiber}, ${estimated.targets.waterMl}, true, now()
-          )
-          on conflict (user_id) do update set
-            calories = excluded.calories,
-            protein = excluded.protein,
-            carbohydrates = excluded.carbohydrates,
-            fat = excluded.fat,
-            fiber = excluded.fiber,
-            water_ml = excluded.water_ml,
-            is_estimate = true,
-            updated_at = now()
-        `;
-      }
-      const profiles = await sql<ProfileRow>`select * from profiles where user_id = ${uid}`;
-      return { ok: true as const, data: { profile: mapProfile(profiles[0]!) } };
+      const profile = await sql.transaction(async (tx) => {
+        if (existing[0]) {
+          await tx`
+            update profiles set
+              name = ${data.name}, age = ${data.age}, sex = ${data.sex}, height_cm = ${data.heightCm},
+              weight_kg = ${data.weightKg}, goal = ${data.goal}, activity = ${data.activity}, diet = ${data.diet},
+              diet_note = ${data.dietNote}, restrictions = ${data.restrictions}, timezone = ${data.timezone},
+              updated_at = now()
+            where user_id = ${uid}
+          `;
+        } else {
+          await tx`
+            insert into profiles (
+              user_id, name, age, sex, height_cm, weight_kg, goal, activity, diet, diet_note, restrictions,
+              timezone, consent_at, consent_version, terms_version, privacy_version
+            ) values (
+              ${uid}, ${data.name}, ${data.age}, ${data.sex}, ${data.heightCm}, ${data.weightKg},
+              ${data.goal}, ${data.activity}, ${data.diet}, ${data.dietNote}, ${data.restrictions},
+              ${data.timezone}, now(), ${LEGAL_VERSIONS.consent}, ${LEGAL_VERSIONS.terms}, ${LEGAL_VERSIONS.privacy}
+            )
+          `;
+          await trackEvent(tx, uid, "onboarding_completed");
+        }
+        const goalRows = await tx`select user_id from goals where user_id = ${uid}`;
+        if (!goalRows[0] || data.recalculate) {
+          const estimated = estimateGoals(data);
+          const source = estimated.qualitative ? "QUALITATIVE" : "AI_ESTIMATE";
+          await tx`
+            insert into goals (
+              user_id, calories, protein, carbohydrates, fat, fiber, water_ml, is_estimate, source, qualitative, updated_at
+            ) values (
+              ${uid}, ${estimated.targets.calories}, ${estimated.targets.protein}, ${estimated.targets.carbohydrates},
+              ${estimated.targets.fat}, ${estimated.targets.fiber}, ${estimated.targets.waterMl}, true,
+              ${source}, ${estimated.qualitative}, now()
+            )
+            on conflict (user_id) do update set
+              calories = excluded.calories,
+              protein = excluded.protein,
+              carbohydrates = excluded.carbohydrates,
+              fat = excluded.fat,
+              fiber = excluded.fiber,
+              water_ml = excluded.water_ml,
+              is_estimate = true,
+              source = excluded.source,
+              qualitative = excluded.qualitative,
+              updated_at = now()
+          `;
+        }
+        const profiles = await tx<ProfileRow>`select * from profiles where user_id = ${uid}`;
+        return mapProfile(profiles[0]!);
+      });
+      return { ok: true as const, data: { profile } };
     });
   });
 
@@ -520,17 +670,27 @@ export const saveGoals = createServerFn({ method: "POST" })
     return quiet(async () => {
       const sql = await getSql();
       const uid = context.userId;
-      await sql`
-        insert into goals (user_id, calories, protein, carbohydrates, fat, fiber, water_ml, is_estimate, updated_at)
-        values (
-          ${uid}, ${Math.round(data.calories)}, ${data.protein}, ${data.carbohydrates}, ${data.fat},
-          ${data.fiber}, ${Math.round(data.waterMl)}, false, now()
-        )
-        on conflict (user_id) do update set
-          calories = excluded.calories, protein = excluded.protein, carbohydrates = excluded.carbohydrates,
-          fat = excluded.fat, fiber = excluded.fiber, water_ml = excluded.water_ml,
-          is_estimate = false, updated_at = now()
-      `;
+      if (await isMinorUser(sql, uid)) {
+        return {
+          ok: false,
+          error: "Para menores de 18 anos não definimos meta calórica. O acompanhamento fica no registro, na água e nos hábitos.",
+        };
+      }
+      await sql.transaction(async (tx) => {
+        await tx`
+          insert into goals (
+            user_id, calories, protein, carbohydrates, fat, fiber, water_ml, is_estimate, source, qualitative, updated_at
+          ) values (
+            ${uid}, ${Math.round(data.calories)}, ${data.protein}, ${data.carbohydrates}, ${data.fat},
+            ${data.fiber}, ${Math.round(data.waterMl)}, false, ${"USER_DEFINED"}, false, now()
+          )
+          on conflict (user_id) do update set
+            calories = excluded.calories, protein = excluded.protein, carbohydrates = excluded.carbohydrates,
+            fat = excluded.fat, fiber = excluded.fiber, water_ml = excluded.water_ml,
+            is_estimate = false, source = 'USER_DEFINED', qualitative = false, updated_at = now()
+        `;
+        await trackEvent(tx, uid, "goal_changed");
+      });
       return { ok: true as const, data: { saved: true as const } };
     });
   });
@@ -581,52 +741,61 @@ export const saveMeal = createServerFn({ method: "POST" })
       const sql = await getSql();
       const uid = context.userId;
       const totals = sumFoods(data.foods);
-      const owned = await sql<{ user_id: string }>`select user_id from meals where id = ${data.id}`;
-      if (owned[0] && owned[0].user_id !== uid) return { ok: false, error: "Esse registro não é seu." };
       const uncertaintyJson = JSON.stringify(data.uncertainties);
-      if (owned[0]) {
-        await sql`
-          update meals set
-            day = ${data.day}, meal_type = ${data.mealType}, eaten_at = ${data.eatenAt}, source = ${data.source},
-            note = ${data.note}, uncertainties = ${uncertaintyJson}, insight = ${data.insight},
-            calories = ${totals.calories}, protein = ${totals.protein}, carbohydrates = ${totals.carbohydrates},
-            fat = ${totals.fat}, fiber = ${totals.fiber}, incomplete = ${totals.incomplete}, updated_at = now()
-          where id = ${data.id} and user_id = ${uid}
-        `;
-      } else {
-        await sql`
-          insert into meals (
-            id, user_id, day, meal_type, eaten_at, source, note, uncertainties, insight,
-            calories, protein, carbohydrates, fat, fiber, incomplete
-          ) values (
-            ${data.id}, ${uid}, ${data.day}, ${data.mealType}, ${data.eatenAt}, ${data.source}, ${data.note},
-            ${uncertaintyJson}, ${data.insight}, ${totals.calories}, ${totals.protein}, ${totals.carbohydrates},
-            ${totals.fat}, ${totals.fiber}, ${totals.incomplete}
-          )
-        `;
-        await trackEvent(sql, uid, "meal_created");
-        if (data.source === "voice") await trackEvent(sql, uid, "voice_meal_created");
-      }
-      await writeFoods(sql, uid, data.id, data.foods);
+      await sql.transaction(async (tx) => {
+        const owned = await tx<{ user_id: string }>`select user_id from meals where id = ${data.id}`;
+        if (owned[0] && owned[0].user_id !== uid) throw new Error("Esse registro não é seu.");
+        if (owned[0]) {
+          await tx`
+            update meals set
+              day = ${data.day}, meal_type = ${data.mealType}, eaten_at = ${data.eatenAt}, source = ${data.source},
+              note = ${data.note}, uncertainties = ${uncertaintyJson}, insight = ${data.insight},
+              calories = ${totals.calories}, protein = ${totals.protein}, carbohydrates = ${totals.carbohydrates},
+              fat = ${totals.fat}, fiber = ${totals.fiber}, incomplete = ${totals.incomplete}, updated_at = now()
+            where id = ${data.id} and user_id = ${uid}
+          `;
+          await trackEvent(tx, uid, "meal_edited");
+        } else {
+          await tx`
+            insert into meals (
+              id, user_id, day, meal_type, eaten_at, source, note, uncertainties, insight,
+              calories, protein, carbohydrates, fat, fiber, incomplete
+            ) values (
+              ${data.id}, ${uid}, ${data.day}, ${data.mealType}, ${data.eatenAt}, ${data.source}, ${data.note},
+              ${uncertaintyJson}, ${data.insight}, ${totals.calories}, ${totals.protein}, ${totals.carbohydrates},
+              ${totals.fat}, ${totals.fiber}, ${totals.incomplete}
+            )
+          `;
+          await trackEvent(tx, uid, "meal_created");
+          if (data.source === "voice") await trackEvent(tx, uid, "voice_meal_created");
+          if (data.source === "barcode") await trackEvent(tx, uid, "barcode_used");
+        }
+        await writeFoods(tx, uid, data.id, data.foods);
+      });
       return { ok: true as const, data: { mealId: data.id } };
     });
   });
 
 export const deleteMeal = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((id: string) => String(id ?? ""))
+  .validator((id: string) => parseEntityId(id))
   .handler(async ({ data, context }): Promise<Result<{ deleted: true }>> => {
     return quiet(async () => {
       const sql = await getSql();
-      await sql`delete from food_items where meal_id = ${data} and user_id = ${context.userId}`;
-      await sql`delete from meals where id = ${data} and user_id = ${context.userId}`;
+      await sql.transaction(async (tx) => {
+        const owned = await findOwnedMeal(tx, context.userId, data);
+        if (!owned) return;
+        await tx`delete from food_items where meal_id = ${data} and user_id = ${context.userId}`;
+        await tx`delete from meals where id = ${data} and user_id = ${context.userId}`;
+        await trackEvent(tx, context.userId, "meal_deleted");
+      });
       return { ok: true as const, data: { deleted: true as const } };
     });
   });
 
 export const duplicateMeal = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((input: { id?: string; day?: string }) => ({ id: String(input?.id ?? ""), day: dayOf(input?.day) }))
+  .validator((input: { id?: string; day?: string }) => ({ id: parseEntityId(input?.id), day: dayOf(input?.day) }))
   .handler(async ({ data, context }): Promise<Result<{ mealId: string }>> => {
     return quiet(async () => {
       const sql = await getSql();
@@ -642,84 +811,116 @@ export const duplicateMeal = createServerFn({ method: "POST" })
       if (!source) return { ok: false, error: "Refeição não encontrada." };
       const id = crypto.randomUUID();
       const totals = sumFoods(source.foods);
-      await sql`
-        insert into meals (
-          id, user_id, day, meal_type, eaten_at, source, note, uncertainties, insight,
-          calories, protein, carbohydrates, fat, fiber, incomplete
-        ) values (
-          ${id}, ${uid}, ${data.day}, ${source.mealType}, ${new Date().toISOString()}, ${source.source},
-          ${source.note}, ${JSON.stringify(source.uncertainties)}, ${source.insight},
-          ${totals.calories}, ${totals.protein}, ${totals.carbohydrates}, ${totals.fat}, ${totals.fiber},
-          ${totals.incomplete}
-        )
-      `;
-      await writeFoods(
-        sql,
-        uid,
-        id,
-        source.foods.map((food) => ({ ...food, id: crypto.randomUUID() })),
-      );
+      await sql.transaction(async (tx) => {
+        await tx`
+          insert into meals (
+            id, user_id, day, meal_type, eaten_at, source, note, uncertainties, insight,
+            calories, protein, carbohydrates, fat, fiber, incomplete
+          ) values (
+            ${id}, ${uid}, ${data.day}, ${source.mealType}, ${new Date().toISOString()}, ${source.source},
+            ${source.note}, ${JSON.stringify(source.uncertainties)}, ${source.insight},
+            ${totals.calories}, ${totals.protein}, ${totals.carbohydrates}, ${totals.fat}, ${totals.fiber},
+            ${totals.incomplete}
+          )
+        `;
+        await writeFoods(
+          tx,
+          uid,
+          id,
+          source.foods.map((food) => ({ ...food, id: crypto.randomUUID() })),
+        );
+      });
       return { ok: true as const, data: { mealId: id } };
     });
   });
 
-async function assertQuota(sql: Sql, userId: string, day: string, kind: "image" | "text" | "chat") {
-  const profiles = await sql<{ plan: string }>`select plan from profiles where user_id = ${userId}`;
-  const plan: PlanId = profiles[0]?.plan === "premium" ? "premium" : "free";
-  const rows = await sql<{ image_count: number; text_count: number; chat_count: number }>`
-    select image_count, text_count, chat_count from ai_usage where user_id = ${userId} and day = ${day}
-  `;
-  const used = Number(rows[0]?.[kind === "image" ? "image_count" : kind === "text" ? "text_count" : "chat_count"] ?? 0);
-  const limit = AI_LIMITS[plan][kind];
-  if (used >= limit) {
-    const label = kind === "image" ? "análises de foto" : kind === "chat" ? "mensagens para a Calu" : "interpretações de texto";
-    throw new Error(
-      `Você chegou ao limite de ${limit} ${label} de hoje no plano ${plan === "premium" ? "Premium" : "gratuito"}. O registro manual continua disponível.`,
-    );
-  }
-}
-
-async function bumpUsage(sql: Sql, userId: string, day: string, kind: "image" | "text" | "chat") {
-  const column = kind === "image" ? "image_count" : kind === "text" ? "text_count" : "chat_count";
-  await sql.query(
-    `insert into ai_usage (user_id, day, ${column}) values ($1, $2, 1)
-     on conflict (user_id, day) do update set ${column} = ai_usage.${column} + 1`,
-    [userId, day],
-  );
-}
-
 function hintFrom(input: Record<string, unknown>): string {
   return String(input.hint ?? "").slice(0, 500);
+}
+
+async function guardedAi<T>(
+  userId: string,
+  kind: "image" | "text" | "chat",
+  action: "analyzePhoto" | "analyzeText" | "sendChat" | "askInsight" | "weeklyCoach",
+  operation: string,
+  run: (minor: boolean) => Promise<{ value: T; usage: TokenUsage }>,
+): Promise<Result<T>> {
+  const requestId = newRequestId();
+  const started = Date.now();
+  const sql = await getSql();
+  const limited = await hitRateLimit(sql, userId, action);
+  if (!limited.ok) return limited;
+  const day = await quotaDay(sql, userId);
+  const reserved = await reserveQuota(sql, userId, day, kind);
+  if (!reserved.ok) return reserved;
+  const minor = await isMinorUser(sql, userId);
+  try {
+    const result = await run(minor);
+    await recordAiCall(sql, {
+      userId,
+      operation,
+      provider: result.usage.provider,
+      model: result.usage.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      success: true,
+      durationMs: Date.now() - started,
+      requestId,
+    });
+    logEvent("ai_analysis_completed", {
+      requestId,
+      userId,
+      provider: result.usage.provider,
+      model: result.usage.model,
+      durationMs: Date.now() - started,
+      success: true,
+      operation,
+    });
+    return { ok: true, data: result.value };
+  } catch (error) {
+    await releaseQuota(sql, userId, day, kind);
+    const { aiErrorMessage } = await import("./ai.server");
+    await recordAiCall(sql, {
+      userId,
+      operation,
+      provider: null,
+      model: null,
+      inputTokens: null,
+      outputTokens: null,
+      success: false,
+      durationMs: Date.now() - started,
+      requestId,
+    }).catch(() => undefined);
+    logEvent("ai_analysis_failed", {
+      requestId,
+      userId,
+      operation,
+      durationMs: Date.now() - started,
+      success: false,
+    });
+    return { ok: false, error: aiErrorMessage(error) };
+  }
 }
 
 export const analyzePhoto = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((input: unknown) => {
     const body = (input ?? {}) as Record<string, unknown>;
-    let image = String(body.imageBase64 ?? "");
-    const embedded = image.match(/base64,([A-Za-z0-9+/=\s]+)$/);
-    if (embedded) image = embedded[1] ?? "";
-    image = image.replace(/\s/g, "");
-    if (image.length < 80 || image.length > 1_800_000 || !/^[A-Za-z0-9+/=]+$/.test(image)) {
-      throw new Error("Não consegui ler essa foto. Tente outra, mais próxima e em JPG.");
-    }
-    return { image, hint: hintFrom(body), hour: Number(body.hour) || 12, day: dayOf(body.day) };
+    return { image: parseImageBase64(body.imageBase64), hint: hintFrom(body), hour: Number(body.hour) || 12, day: dayOf(body.day) };
   })
   .handler(async ({ data, context }): Promise<Result<{ analysis: import("./domain").Analysis }>> => {
     return quiet(async () => {
       const sql = await getSql();
-      await assertQuota(sql, context.userId, data.day, "image");
-      await trackEvent(sql, context.userId, "photo_analysis_started");
-      const { getAIProvider, aiErrorMessage } = await import("./ai.server");
-      try {
-        const analysis = await getAIProvider().analyzeMealImage(data.image, data.hint, data.hour);
-        await bumpUsage(sql, context.userId, data.day, "image");
-        await trackEvent(sql, context.userId, "photo_analysis_completed");
-        return { ok: true as const, data: { analysis } };
-      } catch (error) {
-        console.error("calu_photo_failed");
-        return { ok: false, error: aiErrorMessage(error) };
-      }
+      await trackEvent(sql, context.userId, "photo_started");
+      const result = await guardedAi(context.userId, "image", "analyzePhoto", "analyzePhoto", async (minor) => {
+        const { getAIProvider } = await import("./ai.server");
+        const call = await getAIProvider().analyzeMealImage(data.image, data.hint, data.hour, { minor });
+        return { value: enrichAnalysis(call.value), usage: call.usage };
+      });
+      if (result.ok) await trackEvent(sql, context.userId, "photo_completed");
+      else await trackEvent(sql, context.userId, "photo_failed");
+      if (!result.ok) return result;
+      return { ok: true as const, data: { analysis: result.data } };
     });
   });
 
@@ -734,21 +935,17 @@ export const analyzeText = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }): Promise<Result<{ analysis: import("./domain").Analysis }>> => {
     return quiet(async () => {
-      const sql = await getSql();
-      await assertQuota(sql, context.userId, data.day, "text");
-      const { getAIProvider, aiErrorMessage } = await import("./ai.server");
-      try {
+      const result = await guardedAi(context.userId, "text", "analyzeText", "analyzeText", async (minor) => {
+        const { getAIProvider } = await import("./ai.server");
         const provider = getAIProvider();
-        const analysis =
+        const call =
           data.source === "voice"
-            ? await provider.analyzeMealVoice(data.text, data.hint, data.hour)
-            : await provider.analyzeMealText(data.text, data.hint, data.hour);
-        await bumpUsage(sql, context.userId, data.day, "text");
-        return { ok: true as const, data: { analysis } };
-      } catch (error) {
-        console.error("calu_text_failed");
-        return { ok: false, error: aiErrorMessage(error) };
-      }
+            ? await provider.analyzeMealVoice(data.text, data.hint, data.hour, { minor })
+            : await provider.analyzeMealText(data.text, data.hint, data.hour, { minor });
+        return { value: enrichAnalysis(call.value), usage: call.usage };
+      });
+      if (!result.ok) return result;
+      return { ok: true as const, data: { analysis: result.data } };
     });
   });
 
@@ -782,20 +979,22 @@ export const saveWeight = createServerFn({ method: "POST" })
   .handler(async ({ data, context }): Promise<Result<{ saved: true }>> => {
     return quiet(async () => {
       const sql = await getSql();
-      const existing = await sql<{ id: string }>`
-        select id from weight_logs where user_id = ${context.userId} and day = ${data.day} limit 1
-      `;
-      if (existing[0]) {
-        await sql`
-          update weight_logs set weight_kg = ${data.weightKg}, updated_at = now()
-          where id = ${existing[0].id} and user_id = ${context.userId}
+      await sql.transaction(async (tx) => {
+        const existing = await tx<{ id: string }>`
+          select id from weight_logs where user_id = ${context.userId} and day = ${data.day} limit 1
         `;
-      } else {
-        await sql`
-          insert into weight_logs (id, user_id, day, weight_kg) values (${crypto.randomUUID()}, ${context.userId}, ${data.day}, ${data.weightKg})
-        `;
-      }
-      await sql`update profiles set weight_kg = ${data.weightKg}, updated_at = now() where user_id = ${context.userId}`;
+        if (existing[0]) {
+          await tx`
+            update weight_logs set weight_kg = ${data.weightKg}, updated_at = now()
+            where id = ${existing[0].id} and user_id = ${context.userId}
+          `;
+        } else {
+          await tx`
+            insert into weight_logs (id, user_id, day, weight_kg) values (${crypto.randomUUID()}, ${context.userId}, ${data.day}, ${data.weightKg})
+          `;
+        }
+        await tx`update profiles set weight_kg = ${data.weightKg}, updated_at = now() where user_id = ${context.userId}`;
+      });
       return { ok: true as const, data: { saved: true as const } };
     });
   });
@@ -811,13 +1010,18 @@ export const getProgress = createServerFn({ method: "POST" })
     return quiet(async () => {
       const sql = await getSql();
       const uid = context.userId;
-      const end = new Date(`${data.endDay}T12:00:00`);
-      const startDate = new Date(end);
-      startDate.setDate(end.getDate() - (data.span - 1));
-      const start = startDate.toISOString().slice(0, 10);
-      const meals = await sql<{ day: string; calories: number; protein: number; fiber: number }>`
-        select day, calories, protein, fiber from meals
+      const start = shiftDayKey(data.endDay, -(data.span - 1));
+      const meals = await sql<{ day: string; calories: number; protein: number; fiber: number; carbohydrates: number; fat: number }>`
+        select day,
+          coalesce(sum(calories), 0)::float as calories,
+          coalesce(sum(protein), 0)::float as protein,
+          coalesce(sum(fiber), 0)::float as fiber,
+          coalesce(sum(carbohydrates), 0)::float as carbohydrates,
+          coalesce(sum(fat), 0)::float as fat,
+          count(*)::float as meals
+        from meals
         where user_id = ${uid} and day >= ${start} and day <= ${data.endDay}
+        group by day
       `;
       const water = await sql<{ day: string; ml: number }>`
         select day, sum(amount_ml)::float as ml from water_logs
@@ -829,6 +1033,32 @@ export const getProgress = createServerFn({ method: "POST" })
         where user_id = ${uid} and day >= ${start} and day <= ${data.endDay}
         order by day asc
       `;
+      const checks = await sql<{ day: string; done: unknown }>`
+        select day, done from habit_checks where user_id = ${uid} and day >= ${start} and day <= ${data.endDay}
+      `;
+      const goalRows = await sql<GoalRow>`select * from goals where user_id = ${uid}`;
+      const goals = goalRows[0] ? mapGoals(goalRows[0]) : null;
+      const profiles = await sql<{ age: number | null }>`select age from profiles where user_id = ${uid}`;
+      const age = Number(profiles[0]?.age);
+      const longitudinal = summarizeWindow({
+        span: data.span,
+        mealsByDay: meals.map((row) => ({
+          day: String(row.day),
+          meals: Number((row as { meals?: number }).meals ?? 1),
+          calories: Number(row.calories),
+          protein: Number(row.protein),
+          carbohydrates: Number(row.carbohydrates),
+          fat: Number(row.fat),
+          fiber: Number(row.fiber),
+        })),
+        waterByDay: water.map((row) => ({ day: row.day, ml: Number(row.ml) })),
+        weights: weights.map((row) => ({ day: row.day, kg: Number(row.weight_kg) })),
+        habitChecks: checks.map((row) => ({ day: String(row.day), done: asBool(row.done) })),
+        goals: goals ? { protein: goals.protein, fiber: goals.fiber, waterMl: goals.waterMl } : null,
+        qualitative: Boolean(goals?.qualitative || (Number.isFinite(age) && age < 18)),
+      });
+      await trackEvent(sql, uid, "progress_viewed");
+      if (data.span >= 7) await trackEvent(sql, uid, "weekly_summary_viewed");
       return {
         ok: true as const,
         data: {
@@ -841,6 +1071,7 @@ export const getProgress = createServerFn({ method: "POST" })
           })),
           water: water.map((w) => ({ day: w.day, ml: Math.round(Number(w.ml)) })),
           weights: weights.map((w) => ({ day: w.day, kg: Number(w.weight_kg) })),
+          longitudinal,
         },
       };
     });
@@ -876,17 +1107,26 @@ export const toggleCheck = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((input: { day?: string; habit?: string; done?: boolean }) => {
     const habit = String(input?.habit ?? "");
-    if (!["produce", "activity", "sleep"].includes(habit)) throw new Error("Hábito inválido.");
+    if (!["produce", "activity", "sleep"].includes(habit) && !/^[0-9a-f-]{16,40}$/i.test(habit)) {
+      throw new Error("Hábito inválido.");
+    }
     return { day: dayOf(input?.day), habit, done: input?.done === true };
   })
   .handler(async ({ data, context }): Promise<Result<{ saved: true }>> => {
     return quiet(async () => {
       const sql = await getSql();
+      if (!["produce", "activity", "sleep"].includes(data.habit)) {
+        const owned = await sql<{ id: string }>`
+          select id from micro_habits where id = ${data.habit} and user_id = ${context.userId} and active = true
+        `;
+        if (!owned[0]) return { ok: false, error: "Hábito inválido." };
+      }
       await sql`
         insert into habit_checks (id, user_id, day, habit, done)
         values (${crypto.randomUUID()}, ${context.userId}, ${data.day}, ${data.habit}, ${data.done})
         on conflict (user_id, day, habit) do update set done = ${data.done}
       `;
+      if (data.done) await trackEvent(sql, context.userId, "habit_completed");
       return { ok: true as const, data: { saved: true as const } };
     });
   });
@@ -962,7 +1202,6 @@ export const sendChat = createServerFn({ method: "POST" })
           : "Ainda não guardei preferências. Você pode dizer “lembre que…” ou escrever em Perfil.";
       }
       if (!reply) {
-        await assertQuota(sql, uid, data.day, "chat");
         const history = await sql<{ role: string; content: string }>`
           select role, content from ai_messages where user_id = ${uid} order by created_at desc limit 10
         `;
@@ -970,15 +1209,14 @@ export const sendChat = createServerFn({ method: "POST" })
           role: "user" | "assistant";
           content: string;
         }[];
-        const { getAIProvider, aiErrorMessage } = await import("./ai.server");
-        try {
-          await trackEvent(sql, uid, "ai_chat_started");
-          reply = await getAIProvider().chat(ordered, await diaryContext(sql, uid, data.day));
-          await bumpUsage(sql, uid, data.day, "chat");
-        } catch (error) {
-          console.error("calu_chat_failed");
-          reply = aiErrorMessage(error);
-        }
+        await trackEvent(sql, uid, "chat_started");
+        const result = await guardedAi(uid, "chat", "sendChat", "sendChat", async (minor) => {
+          const { getAIProvider } = await import("./ai.server");
+          const call = await getAIProvider().chat(ordered, await diaryContext(sql, uid, data.day), { minor });
+          return { value: call.value, usage: call.usage };
+        });
+        reply = result.ok ? result.data : result.error;
+        if (result.ok) await trackEvent(sql, uid, "chat_completed");
       }
       await sql`insert into ai_messages (id, user_id, role, content) values (${crypto.randomUUID()}, ${uid}, ${"assistant"}, ${reply})`;
       return { ok: true as const, data: { reply: reply! } };
@@ -987,20 +1225,42 @@ export const sendChat = createServerFn({ method: "POST" })
 
 export const listChat = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(() => ({}))
-  .handler(async ({ context }): Promise<Result<{ messages: { id: string; role: string; content: string }[] }>> => {
+  .validator((input: { before?: string } | undefined) => {
+    const before = input && typeof input === "object" ? String(input.before ?? "") : "";
+    if (before && Number.isNaN(Date.parse(before))) throw new Error("Página inválida.");
+    return { before };
+  })
+  .handler(async ({ data, context }): Promise<Result<{ messages: { id: string; role: string; content: string; createdAt: string }[] }>> => {
     return quiet(async () => {
       const sql = await getSql();
-      const rows = await sql<{ id: string; role: string; content: string }>`
-        select id, role, content from ai_messages where user_id = ${context.userId} order by created_at desc limit 40
-      `;
-      return { ok: true as const, data: { messages: rows.reverse() } };
+      const rows = data.before
+        ? await sql<{ id: string; role: string; content: string; created_at: unknown }>`
+            select id, role, content, created_at from ai_messages
+            where user_id = ${context.userId} and created_at < ${data.before}
+            order by created_at desc limit 40
+          `
+        : await sql<{ id: string; role: string; content: string; created_at: unknown }>`
+            select id, role, content, created_at from ai_messages
+            where user_id = ${context.userId}
+            order by created_at desc limit 40
+          `;
+      return {
+        ok: true as const,
+        data: {
+          messages: rows.reverse().map((row) => ({
+            id: row.id,
+            role: row.role,
+            content: row.content,
+            createdAt: iso(row.created_at),
+          })),
+        },
+      };
     });
   });
 
 export const deleteMemory = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((id: string) => String(id ?? ""))
+  .validator((id: string) => parseEntityId(id))
   .handler(async ({ data, context }): Promise<Result<{ deleted: true }>> => {
     return quiet(async () => {
       const sql = await getSql();
@@ -1029,8 +1289,8 @@ export const addMemory = createServerFn({ method: "POST" })
 
 export const lookupBarcode = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((code: string) => String(code ?? "").replace(/\D/g, "").slice(0, 20))
-  .handler(async ({ data }): Promise<Result<{
+  .validator((code: string) => parseBarcode(code))
+  .handler(async ({ data, context }): Promise<Result<{
     name: string;
     quantity: number;
     unit: string;
@@ -1040,58 +1300,82 @@ export const lookupBarcode = createServerFn({ method: "POST" })
     fat: number | null;
     fiber: number | null;
     note: string;
+    completeness: "complete" | "partial" | "unavailable";
+    nutritionSource: "OPEN_FOOD_FACTS";
   }>> => {
     return quiet(async () => {
-      if (data.length < 8) return { ok: false, error: "Código inválido." };
-      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${data}.json`, {
-        headers: { "User-Agent": "CaluAI/1.0 (meal diary; contact via app)" },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) return { ok: false, error: "Produto não encontrado." };
-      const body = (await res.json()) as {
-        status?: number;
-        product?: {
-          product_name_pt?: string;
-          product_name?: string;
-          nutriments?: Record<string, number | string | undefined>;
-          serving_quantity?: number | string;
-        };
-      };
-      if (body.status !== 1 || !body.product) return { ok: false, error: "Produto não encontrado." };
-      const ntr = body.product.nutriments ?? {};
-      const pick = (key: string) => {
-        const value = ntr[key];
-        const parsed = typeof value === "number" ? value : Number(value);
-        return Number.isFinite(parsed) ? Math.round(parsed * 10) / 10 : null;
-      };
-      const per100 = pick("energy-kcal_100g") != null;
-      const serving = Number(body.product.serving_quantity);
-      const quantity = Number.isFinite(serving) && serving > 0 ? serving : 100;
-      const factor = per100 ? quantity / 100 : 1;
-      const base = (key100: string, keyServing: string) => {
-        if (per100) {
-          const value = pick(key100);
-          return value == null ? null : Math.round(value * factor * 10) / 10;
+      const sql = await getSql();
+      const limited = await hitRateLimit(sql, context.userId, "lookupBarcode");
+      if (!limited.ok) return limited;
+      const cached = await sql<{ payload: string; fetched_at: unknown }>`
+        select payload, fetched_at from barcode_cache where code = ${data}
+      `;
+      const fresh = cached[0] && Date.now() - Date.parse(iso(cached[0].fetched_at)) < 7 * 24 * 60 * 60 * 1000;
+      let normalized: ReturnType<typeof normalizeOffProduct> | null = null;
+      if (fresh && cached[0]) {
+        try {
+          normalized = normalizeOffProduct(JSON.parse(cached[0].payload));
+        } catch {
+          normalized = null;
         }
-        return pick(keyServing);
-      };
-      const name = body.product.product_name_pt || body.product.product_name || "Produto sem nome";
-      const calories = base("energy-kcal_100g", "energy-kcal_serving");
+      }
+      if (!normalized || "error" in normalized) {
+        let res: Response;
+        try {
+          res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(data)}.json`, {
+            headers: { "User-Agent": "CaluAI/1.0 (meal diary; contact via app)" },
+            signal: AbortSignal.timeout(8000),
+          });
+        } catch {
+          return { ok: false, error: "Não consegui consultar o código agora. Tente de novo." };
+        }
+        if (res.status === 404) return { ok: false, error: "Produto não encontrado." };
+        if (!res.ok) return { ok: false, error: "Não consegui consultar o código agora. Tente de novo." };
+        const body = await res.json().catch(() => null);
+        const parsed = normalizeOffProduct(body);
+        if ("error" in parsed) return { ok: false, error: parsed.error };
+        normalized = parsed;
+        const compact = {
+          status: 1,
+          product: {
+            product_name: parsed.name,
+            serving_quantity: parsed.quantity,
+            nutriments: {
+              "energy-kcal_100g": parsed.per100?.calories,
+              proteins_100g: parsed.per100?.protein,
+              carbohydrates_100g: parsed.per100?.carbohydrates,
+              fat_100g: parsed.per100?.fat,
+              fiber_100g: parsed.per100?.fiber,
+              "energy-kcal_serving": parsed.perServing?.calories,
+              proteins_serving: parsed.perServing?.protein,
+              carbohydrates_serving: parsed.perServing?.carbohydrates,
+              fat_serving: parsed.perServing?.fat,
+              fiber_serving: parsed.perServing?.fiber,
+            },
+          },
+        };
+        await sql`
+          insert into barcode_cache (code, payload, fetched_at)
+          values (${data}, ${JSON.stringify(compact)}, now())
+          on conflict (code) do update set payload = excluded.payload, fetched_at = now()
+        `;
+      }
+      if ("error" in normalized) return { ok: false, error: String(normalized.error) };
+      await trackEvent(sql, context.userId, "barcode_used");
       return {
         ok: true as const,
         data: {
-          name: name.slice(0, 80),
-          quantity,
-          unit: "g",
-          calories: calories == null ? null : Math.round(calories),
-          protein: base("proteins_100g", "proteins_serving"),
-          carbohydrates: base("carbohydrates_100g", "carbohydrates_serving"),
-          fat: base("fat_100g", "fat_serving"),
-          fiber: base("fiber_100g", "fiber_serving"),
-          note:
-            calories == null
-              ? "Produto encontrado, mas os dados nutricionais não estão disponíveis na base."
-              : "Valores do rótulo informados na Open Food Facts. Confira a porção antes de salvar.",
+          name: normalized.name,
+          quantity: normalized.quantity,
+          unit: normalized.unit,
+          calories: normalized.calories == null ? null : Math.round(normalized.calories),
+          protein: normalized.protein,
+          carbohydrates: normalized.carbohydrates,
+          fat: normalized.fat,
+          fiber: normalized.fiber,
+          note: normalized.note,
+          completeness: normalized.completeness,
+          nutritionSource: "OPEN_FOOD_FACTS" as const,
         },
       };
     });
@@ -1106,10 +1390,10 @@ export const exportData = createServerFn({ method: "POST" })
       const uid = context.userId;
       const profile = await sql`select name, age, sex, height_cm, weight_kg, goal, activity, diet, diet_note, restrictions, plan, created_at from profiles where user_id = ${uid}`;
       const goals = await sql`select calories, protein, carbohydrates, fat, fiber, water_ml, is_estimate from goals where user_id = ${uid}`;
-      const meals = await sql`select id, day, meal_type, eaten_at, source, note, calories, protein, carbohydrates, fat, fiber from meals where user_id = ${uid} order by eaten_at`;
-      const foods = await sql`select meal_id, name, quantity, unit, calories, protein, carbohydrates, fat, fiber, source, data_status from food_items where user_id = ${uid}`;
-      const water = await sql`select day, amount_ml, created_at from water_logs where user_id = ${uid} order by created_at`;
-      const weight = await sql`select day, weight_kg from weight_logs where user_id = ${uid} order by day`;
+      const meals = await sql`select id, day, meal_type, eaten_at, source, note, calories, protein, carbohydrates, fat, fiber from meals where user_id = ${uid} order by eaten_at desc limit 2000`;
+      const foods = await sql`select meal_id, name, quantity, unit, calories, protein, carbohydrates, fat, fiber, source, data_status, nutrition_source from food_items where user_id = ${uid} limit 8000`;
+      const water = await sql`select day, amount_ml, created_at from water_logs where user_id = ${uid} order by created_at desc limit 4000`;
+      const weight = await sql`select day, weight_kg from weight_logs where user_id = ${uid} order by day desc limit 2000`;
       const memory = await sql`select fact, created_at from ai_memory where user_id = ${uid}`;
       return {
         ok: true as const,
@@ -1134,11 +1418,13 @@ export const deleteHistory = createServerFn({ method: "POST" })
     return quiet(async () => {
       const sql = await getSql();
       const uid = context.userId;
-      await sql`delete from food_items where user_id = ${uid}`;
-      await sql`delete from meals where user_id = ${uid}`;
-      await sql`delete from water_logs where user_id = ${uid}`;
-      await sql`delete from weight_logs where user_id = ${uid}`;
-      await sql`delete from habit_checks where user_id = ${uid}`;
+      await sql.transaction(async (tx) => {
+        await tx`delete from food_items where user_id = ${uid}`;
+        await tx`delete from meals where user_id = ${uid}`;
+        await tx`delete from water_logs where user_id = ${uid}`;
+        await tx`delete from weight_logs where user_id = ${uid}`;
+        await tx`delete from habit_checks where user_id = ${uid}`;
+      });
       return { ok: true as const, data: { deleted: true as const } };
     });
   });
@@ -1150,20 +1436,118 @@ export const deleteAccountData = createServerFn({ method: "POST" })
     return quiet(async () => {
       const sql = await getSql();
       const uid = context.userId;
-      await sql`delete from food_items where user_id = ${uid}`;
-      await sql`delete from meals where user_id = ${uid}`;
-      await sql`delete from water_logs where user_id = ${uid}`;
-      await sql`delete from weight_logs where user_id = ${uid}`;
-      await sql`delete from habit_checks where user_id = ${uid}`;
-      await sql`delete from habits where user_id = ${uid}`;
-      await sql`delete from ai_messages where user_id = ${uid}`;
-      await sql`delete from ai_memory where user_id = ${uid}`;
-      await sql`delete from ai_usage where user_id = ${uid}`;
-      await sql`delete from notification_prefs where user_id = ${uid}`;
-      await sql`delete from goals where user_id = ${uid}`;
-      await sql`delete from profiles where user_id = ${uid}`;
-      await sql`delete from analytics_events where user_id = ${uid}`;
+      await sql.transaction(async (tx) => {
+        await wipeUserData(tx, uid);
+      });
       return { ok: true as const, data: { deleted: true as const } };
+    });
+  });
+
+export const deleteAccount = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(() => ({}))
+  .handler(async ({ context }): Promise<Result<{ deleted: true }>> => {
+    return quiet(async () => {
+      const sql = await getSql();
+      const uid = context.userId;
+      await sql.transaction(async (tx) => {
+        await wipeUserData(tx, uid);
+        await wipeAuthIdentity(tx, uid);
+      });
+      return { ok: true as const, data: { deleted: true as const } };
+    });
+  });
+
+export const acceptMicroHabit = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((label: string) => {
+    const text = String(label ?? "").trim();
+    if (text.length < 3 || text.length > 120) throw new Error("Descreva um hábito curto.");
+    return text;
+  })
+  .handler(async ({ data, context }): Promise<Result<{ id: string }>> => {
+    return quiet(async () => {
+      const sql = await getSql();
+      const count = await sql<{ n: number }>`select count(*)::float as n from micro_habits where user_id = ${context.userId} and active = true`;
+      if (Number(count[0]?.n ?? 0) >= 8) return { ok: false, error: "Você já tem micro-hábitos suficientes. Desligue algum antes." };
+      const id = crypto.randomUUID();
+      await sql`insert into micro_habits (id, user_id, label, active) values (${id}, ${context.userId}, ${data}, true)`;
+      await trackEvent(sql, context.userId, "habit_created");
+      return { ok: true as const, data: { id } };
+    });
+  });
+
+export const generateWeeklyCoach = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((input: { day?: string }) => ({ day: dayOf(input?.day) }))
+  .handler(async ({ data, context }): Promise<Result<{ observed: string; attention: string; opportunity: string; habit: string; source: "ai" | "records" }>> => {
+    return quiet(async () => {
+      const sql = await getSql();
+      const uid = context.userId;
+      const start = shiftDayKey(data.day, -6);
+      const meals = await sql<DayAgg>`
+        select day, count(*)::float as meals,
+          coalesce(sum(calories), 0)::float as calories,
+          coalesce(sum(protein), 0)::float as protein,
+          coalesce(sum(carbohydrates), 0)::float as carbohydrates,
+          coalesce(sum(fat), 0)::float as fat,
+          coalesce(sum(fiber), 0)::float as fiber
+        from meals where user_id = ${uid} and day >= ${start} and day <= ${data.day}
+        group by day
+      `;
+      const water = await sql<{ day: string; ml: number }>`
+        select day, coalesce(sum(amount_ml), 0)::float as ml from water_logs
+        where user_id = ${uid} and day >= ${start} and day <= ${data.day} group by day
+      `;
+      const weights = await sql<{ day: string; kg: number }>`
+        select day, weight_kg as kg from weight_logs where user_id = ${uid} and day >= ${start} and day <= ${data.day}
+      `;
+      const checks = await sql<{ day: string; done: unknown }>`
+        select day, done from habit_checks where user_id = ${uid} and day >= ${start} and day <= ${data.day}
+      `;
+      const goalRows = await sql<GoalRow>`select * from goals where user_id = ${uid}`;
+      const goals = goalRows[0] ? mapGoals(goalRows[0]) : null;
+      const minor = await isMinorUser(sql, uid);
+      const summary = summarizeWindow({
+        span: 7,
+        mealsByDay: meals.map((row) => ({
+          day: String(row.day),
+          meals: Number(row.meals),
+          calories: Number(row.calories),
+          protein: Number(row.protein),
+          carbohydrates: Number(row.carbohydrates),
+          fat: Number(row.fat),
+          fiber: Number(row.fiber),
+        })),
+        waterByDay: water.map((row) => ({ day: row.day, ml: Number(row.ml) })),
+        weights: weights.map((row) => ({ day: row.day, kg: Number(row.kg) })),
+        habitChecks: checks.map((row) => ({ day: String(row.day), done: asBool(row.done) })),
+        goals: goals ? { protein: goals.protein, fiber: goals.fiber, waterMl: goals.waterMl } : null,
+        qualitative: minor || Boolean(goals?.qualitative),
+      });
+      if (summary.recordedDays < 2) {
+        const fallback = fallbackCoach(summary);
+        return { ok: true as const, data: { ...fallback, source: "records" as const } };
+      }
+      const contextText = [
+        summary.consistency,
+        summary.sampleNote,
+        ...summary.patterns,
+        summary.avgProtein != null ? `Proteína média nos dias registrados: ${summary.avgProtein} g.` : "",
+        summary.avgFiber != null ? `Fibra média: ${summary.avgFiber} g.` : "",
+        summary.avgWater != null ? `Água média: ${summary.avgWater} ml.` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const result = await guardedAi(uid, "text", "weeklyCoach", "weeklyCoach", async (isMinor) => {
+        const { getAIProvider } = await import("./ai.server");
+        const call = await getAIProvider().generateWeeklyCoach(contextText, { minor: isMinor });
+        return { value: call.value, usage: call.usage };
+      });
+      const parsed = result.ok ? parseCoach(extractJson(result.data)) : null;
+      if (!result.ok && /limite|Muitas tentativas/i.test(result.error)) return result;
+      const coach = parsed ?? fallbackCoach(summary);
+      return { ok: true as const, data: { ...coach, source: parsed ? ("ai" as const) : ("records" as const) } };
     });
   });
 
@@ -1173,14 +1557,13 @@ export const askInsight = createServerFn({ method: "POST" })
   .handler(async ({ data, context }): Promise<Result<{ insight: string }>> => {
     return quiet(async () => {
       const sql = await getSql();
-      await assertQuota(sql, context.userId, data.day, "text");
-      const { getAIProvider, aiErrorMessage } = await import("./ai.server");
-      try {
-        const insight = await getAIProvider().generateDailyInsight(await diaryContext(sql, context.userId, data.day));
-        await bumpUsage(sql, context.userId, data.day, "text");
-        return { ok: true as const, data: { insight } };
-      } catch (error) {
-        return { ok: false, error: aiErrorMessage(error) };
-      }
+      const contextText = await diaryContext(sql, context.userId, data.day);
+      const result = await guardedAi(context.userId, "text", "askInsight", "dailyInsight", async (minor) => {
+        const { getAIProvider } = await import("./ai.server");
+        const call = await getAIProvider().generateDailyInsight(contextText, { minor });
+        return { value: call.value, usage: call.usage };
+      });
+      if (!result.ok) return result;
+      return { ok: true as const, data: { insight: result.data } };
     });
   });

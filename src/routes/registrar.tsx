@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { analyzePhoto, analyzeText, lookupBarcode, saveMeal } from "@/lib/calu/api";
 import { foodFromTaco, searchTaco } from "@/lib/calu/catalog";
 import { compressImage, enqueueMeal, friendlyError, isOfflineError, todayKey, type MealPayload } from "@/lib/calu/client";
@@ -25,6 +26,7 @@ type Phase = "capture" | "analyzing" | "review" | "saved";
 
 function RegisterPage() {
   const { modo, id } = Route.useSearch();
+  const { user } = useCurrentUserState();
   const navigate = useNavigate();
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
@@ -175,8 +177,7 @@ function RegisterPage() {
         return;
       }
       const item = result.data;
-      setFoods([
-        makeFood({
+      const draft = makeFood({
           id: crypto.randomUUID(),
           name: item.name,
           quantity: item.quantity,
@@ -187,9 +188,11 @@ function RegisterPage() {
           fat: item.fat,
           fiber: item.fiber,
           source: "barcode",
-          dataStatus: item.calories == null ? "unavailable" : "reference",
-        }),
-      ]);
+          dataStatus: item.completeness === "unavailable" ? "unavailable" : "reference",
+        });
+      draft.nutritionSource = "OPEN_FOOD_FACTS";
+      draft.nutritionConfidence = item.completeness === "complete" ? 0.9 : item.completeness === "partial" ? 0.55 : 0;
+      setFoods([draft]);
       setUncertainties([item.note]);
       setSource("barcode");
       setMealType(guessMeal());
@@ -227,7 +230,7 @@ function RegisterPage() {
       setPhase("saved");
     } catch (error) {
       if (isOfflineError(error)) {
-        enqueueMeal(payload);
+        enqueueMeal(user?.id ?? "local", payload);
         setOfflineNote("Salvo neste aparelho. Sincroniza quando a internet voltar.");
         setPhase("saved");
       } else toast.error(friendlyError(error));

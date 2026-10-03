@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
-import { getProgress, saveHabits, saveWeight, toggleCheck, getHome, type HomeData } from "@/lib/calu/api";
+import { acceptMicroHabit, generateWeeklyCoach, getProgress, saveHabits, saveWeight, toggleCheck, getHome, type HomeData } from "@/lib/calu/api";
 import { friendlyError, todayKey } from "@/lib/calu/client";
 import { summarizeHistory } from "@/lib/calu/domain";
 import { Boot, Button, Shell, controlClass } from "@/components/calu/chrome";
@@ -31,6 +31,7 @@ function ProgressBody({ day }: { day: string }) {
   const [data, setData] = useState<Awaited<ReturnType<typeof load>> | null>(null);
   const [home, setHome] = useState<HomeData | null>(null);
   const [weight, setWeight] = useState("");
+  const [coach, setCoach] = useState<{ observed: string; attention: string; opportunity: string; habit: string } | null>(null);
 
   async function load(nextSpan = span) {
     const result = await getProgress({ data: { endDay: day, span: nextSpan } });
@@ -79,7 +80,49 @@ function ProgressBody({ day }: { day: string }) {
           </button>
         ))}
       </div>
-      <p className="mt-4 text-sm leading-6">{summary.narrative}</p>
+      <p className="mt-4 text-sm leading-6">{data.longitudinal?.sampleNote ?? summary.narrative}</p>
+      {data.longitudinal?.patterns?.length ? (
+        <ul className="mt-3 space-y-2 text-sm leading-6">
+          {data.longitudinal.patterns.slice(0, 4).map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      ) : null}
+      {data.longitudinal?.weight ? <p className="mt-3 text-sm text-muted">{data.longitudinal.weight.narrative}</p> : null}
+      {span === 7 ? (
+        <div className="mt-4">
+          <Button
+            variant="secondary"
+            onClick={() =>
+              void generateWeeklyCoach({ data: { day } }).then((result) => {
+                if (!result.ok) toast.error(result.error);
+                else setCoach(result.data);
+              })
+            }
+          >
+            Olhar da semana
+          </Button>
+          {coach ? (
+            <div className="mt-3 space-y-2 text-sm leading-6">
+              <p><strong>O que observei. </strong>{coach.observed}</p>
+              <p><strong>Um ponto de atenção. </strong>{coach.attention}</p>
+              <p><strong>Uma oportunidade. </strong>{coach.opportunity}</p>
+              <p><strong>Um pequeno hábito. </strong>{coach.habit}</p>
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  void acceptMicroHabit({ data: coach.habit }).then((result) => {
+                    if (!result.ok) toast.error(result.error);
+                    else toast.success("Hábito guardado. Você decide quando marcar.");
+                  })
+                }
+              >
+                Quero tentar esse hábito
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mt-4 grid grid-cols-2 gap-3">
         <Stat label="Média de calorias" value={summary.avgCalories == null ? "—" : String(summary.avgCalories)} />
         <Stat label="Média de proteína" value={summary.avgProtein == null ? "—" : `${summary.avgProtein} g`} />

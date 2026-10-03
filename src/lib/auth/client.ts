@@ -219,6 +219,12 @@ function waitForPopupToken(popup: Window): Promise<string | null> {
  * preview the local clear is sufficient, so it always resolves.
  */
 export async function signOut(redirectTo = "/"): Promise<void> {
+  try {
+    const { clearPrivateCache } = await import("@/lib/calu/client");
+    clearPrivateCache();
+  } catch {
+    /* o diário local é só um cache; a sessão ainda precisa ser encerrada */
+  }
   await runSignOut({
     livePreview: inLivePreview(),
     hasBearer: Boolean(getBearerToken()),
