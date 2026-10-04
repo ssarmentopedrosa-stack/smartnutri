@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import {
   addWater,
+  askCoach,
   askInsight,
   deleteMeal,
   duplicateMeal,
@@ -19,8 +20,10 @@ import { foodFromTaco, suggestSubstitutes } from "@/lib/calu/catalog";
 import { friendlyError, todayKey } from "@/lib/calu/client";
 import { MEAL_TYPES, formatQty, mealLabel, withQuantity, type FoodDraft } from "@/lib/calu/domain";
 import { foodRecordState } from "@/lib/calu/daily-board";
+import { COACH_UNAVAILABLE, type CoachAnswer } from "@/lib/calu/daily-coach";
 import { shiftDayKey } from "@/lib/calu/timezone";
 import { Boot, Button, Meter, Shell, controlClass } from "@/components/calu/chrome";
+import { CoachCard } from "@/components/calu/coach-card";
 
 export const Route = createFileRoute("/diario")({ component: DiaryPage });
 
@@ -47,6 +50,8 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
   const [customWater, setCustomWater] = useState("");
   const [insight, setInsight] = useState("");
   const [insightBusy, setInsightBusy] = useState(false);
+  const [coachBusy, setCoachBusy] = useState(false);
+  const [coachReply, setCoachReply] = useState<CoachAnswer | null>(null);
   const today = todayKey();
   const futureLocked = day >= today;
 
@@ -55,6 +60,7 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
     if (result.ok) {
       setHome(result.data);
       if (result.data.cachedInsight) setInsight(result.data.cachedInsight);
+      setCoachReply(null);
     } else toast.error(result.error);
   }
 
@@ -217,6 +223,54 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
         </Button>
       </div>
 
+      {home.coach ? (
+        <CoachCard
+          card={home.coach}
+          busy={coachBusy}
+          reply={coachReply}
+          onAction={(card) => {
+            if (card.action === "water") void drink(200);
+            else if (card.action === "meal") void navigate({ to: "/registrar", search: { modo: "busca", id: "", manual: false } });
+            else if (card.action === "weight") void navigate({ to: "/progresso" });
+            else if (card.action === "goals") void navigate({ to: "/" });
+            else document.getElementById("refeicoes")?.scrollIntoView({ block: "start" });
+          }}
+          onAsk={(question) => {
+            setCoachBusy(true);
+            void askCoach({ data: { day, question } })
+              .then((result) => {
+                if (!result.ok) {
+                  setCoachReply({
+                    state: home.coach?.state ?? "ON_TRACK",
+                    title: home.coach?.title ?? "CALU Coach",
+                    message: result.error.includes("pergunta") ? result.error : COACH_UNAVAILABLE,
+                    support: home.coach?.message ?? "",
+                    reason: home.coach?.reason ?? "",
+                    action: home.coach?.action ?? "diary",
+                    actionLabel: home.coach?.actionLabel ?? "Ver diário",
+                    source: "fallback",
+                  });
+                  return;
+                }
+                setCoachReply(result.data);
+              })
+              .catch(() => {
+                setCoachReply({
+                  state: home.coach?.state ?? "ON_TRACK",
+                  title: home.coach?.title ?? "CALU Coach",
+                  message: COACH_UNAVAILABLE,
+                  support: home.coach?.message ?? "",
+                  reason: home.coach?.reason ?? "",
+                  action: home.coach?.action ?? "diary",
+                  actionLabel: home.coach?.actionLabel ?? "Ver diário",
+                  source: "fallback",
+                });
+              })
+              .finally(() => setCoachBusy(false));
+          }}
+        />
+      ) : null}
+
       <section className="mt-6 rounded-3xl bg-card px-4 py-4">
         <h2 className="font-display text-xl font-medium">CALU percebeu</h2>
         <p className="mt-2 text-sm leading-6">{insight || board?.note || "O diário continua disponível mesmo sem a Calu."}</p>
@@ -242,7 +296,7 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
       {grouped.length === 0 ? (
         <p className="mt-8 text-muted">Nenhuma refeição neste dia.</p>
       ) : (
-        <div className="mt-6 space-y-4">
+        <div id="refeicoes" className="mt-6 space-y-4">
           {grouped.map((group) => (
             <section key={group.id} aria-label={group.label}>
               <h2 className="text-sm tracking-wide text-muted uppercase">{group.label}</h2>

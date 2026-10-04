@@ -48,8 +48,18 @@ import { resolveFoodName } from "./resolver";
 import { preferStructuredSource } from "./search";
 import { authorizeRecordedFood } from "./authority";
 import { parseBarcode, parseDay, parseEntityId, parseImageBase64, parseAge, parseNotificationEnabled, assertNotFutureDay } from "./validation";
-import { isValidTimeZone, shiftDayKey, dayKeyInTimeZone, hourInTimeZone } from "./timezone";
+import { isValidTimeZone, shiftDayKey, dayKeyInTimeZone, hourInTimeZone, daysInclusive } from "./timezone";
 import { buildDailyBoard, contextHash, foodRecordState, insightContext, parseDailyInsight, rescaleRecordedFood, type DailyBoard } from "./daily-board";
+import { buildCoachContext, fillHistoryDays, scopedUserId, type CoachContext, coachContextForModel } from "./coach-context";
+import {
+  decideCoach,
+  fallbackCoachAnswer,
+  parseCoachAsk,
+  resolveCoachAsk,
+  coachQuestionHash,
+  type CoachAnswer,
+  type DailyCoachCard,
+} from "./daily-coach";
 import { getDailySummary, summarizeWindow, type DailySummary, type DayAgg } from "./longitudinal";
 import { fallbackCoach, parseCoach } from "./coach";
 import type { TokenUsage } from "./ai.server";
@@ -92,6 +102,45 @@ function boardFor(
     waterMl,
     targets: goals,
     incompleteItems: foods.filter((food) => foodRecordState(food) !== "CONFIRMED").length,
+  });
+}
+
+function coachContextFrom(input: {
+  day: string;
+  timezone: string;
+  hour: number;
+  qualitative: boolean;
+  tracksWeight: boolean;
+  goals: GoalTargets | null;
+  meals: MealDTO[];
+  waterMl: number;
+  weightKg: number | null;
+  habitsDone: number;
+  habitsTotal: number;
+  historyDays: ReturnType<typeof fillHistoryDays>;
+}): CoachContext {
+  const foods = input.meals.flatMap((meal) => meal.foods);
+  return buildCoachContext({
+    date: input.day,
+    timezone: input.timezone,
+    hour: input.hour,
+    qualitative: input.qualitative,
+    tracksWeight: input.tracksWeight,
+    goals: input.goals,
+    today: {
+      calories: input.meals.reduce((sum, meal) => sum + Number(meal.calories ?? 0), 0),
+      protein: input.meals.reduce((sum, meal) => sum + Number(meal.protein ?? 0), 0),
+      carbohydrates: input.meals.reduce((sum, meal) => sum + Number(meal.carbohydrates ?? 0), 0),
+      fat: input.meals.reduce((sum, meal) => sum + Number(meal.fat ?? 0), 0),
+      fiber: input.meals.reduce((sum, meal) => sum + Number(meal.fiber ?? 0), 0),
+      waterMl: input.waterMl,
+      mealCount: input.meals.length,
+      incompleteItems: foods.filter((food) => foodRecordState(food) !== "CONFIRMED").length,
+      weightKg: input.weightKg,
+      habitsDone: input.habitsDone,
+      habitsTotal: input.habitsTotal,
+    },
+    historyDays: input.historyDays,
   });
 }
 
@@ -570,6 +619,35 @@ export const getHome = createServerFn({ method: "POST" })
         select text, context_hash from daily_insights where user_id = ${uid} and day = ${data.day}
       `;
       const cachedInsight = cachedRows[0]?.context_hash === insightHash ? cachedRows[0].text : null;
+      const habitsDone = checks.filter((check) => asBool(check.done)).length;
+      const zone = profile?.timezone || "America/Sao_Paulo";
+      const coachHour = data.day < dayKeyInTimeZone(new Date(), zone) ? 21 : hour;
+      const coach = decideCoach(
+        coachContextFrom({
+          day: data.day,
+          timezone: zone,
+          hour: coachHour,
+          qualitative,
+          tracksWeight: Boolean(profile && ["controlar", "massa", "manter"].includes(profile.goal)) || weekWeights.length > 0,
+          goals,
+          meals,
+          waterMl,
+          weightKg: weightToday[0] ? Number(weightToday[0].kg) : null,
+          habitsDone,
+          habitsTotal,
+          historyDays: fillHistoryDays(
+            daysInclusive(weekStart, data.day),
+            weekMeals.map((row) => ({
+              day: String(row.day),
+              meals: Number(row.meals),
+              calories: Number(row.calories),
+              protein: Number(row.protein),
+            })),
+            weekWater.map((row) => ({ day: String(row.day), ml: Number(row.ml) })),
+            weekWeights.map((row) => ({ day: String(row.day), kg: Number(row.kg) })),
+          ),
+        }),
+      );
       return {
         ok: true as const,
         data: {
@@ -598,6 +676,7 @@ export const getHome = createServerFn({ method: "POST" })
           daily,
           board,
           cachedInsight,
+          coach,
         },
       };
     });
@@ -618,6 +697,7 @@ export type HomeData = {
   daily?: DailySummary;
   board?: DailyBoard;
   cachedInsight?: string | null;
+  coach?: DailyCoachCard;
 };
 
 export const saveProfile = createServerFn({ method: "POST" })
@@ -948,7 +1028,7 @@ function hintFrom(input: Record<string, unknown>): string {
 async function guardedAi<T>(
   userId: string,
   kind: "image" | "text" | "chat",
-  action: "analyzePhoto" | "analyzeText" | "sendChat" | "askInsight" | "weeklyCoach",
+  action: "analyzePhoto" | "analyzeText" | "sendChat" | "askInsight" | "weeklyCoach" | "askCoach",
   operation: string,
   run: (minor: boolean) => Promise<{ value: T; usage: TokenUsage }>,
 ): Promise<Result<T>> {
@@ -1752,5 +1832,143 @@ export const askInsight = createServerFn({ method: "POST" })
         on conflict (user_id, day) do update set context_hash = excluded.context_hash, text = excluded.text, created_at = now()
       `;
       return { ok: true as const, data: { insight: parsed, source: "ai" as const } };
+    });
+  });
+
+async function loadCoachContext(sql: Sql, uid: string, day: string): Promise<CoachContext> {
+  const profiles = await sql<ProfileRow>`select * from profiles where user_id = ${uid}`;
+  const profile = profiles[0] ? mapProfile(profiles[0]) : null;
+  const goalRows = await sql<GoalRow>`select * from goals where user_id = ${uid}`;
+  const goals = goalRows[0] ? mapGoals(goalRows[0]) : null;
+  const meals = await loadMeals(sql, uid, day);
+  const waterRows = await sql<{ total: number }>`
+    select coalesce(sum(amount_ml), 0)::float as total from water_logs where user_id = ${uid} and day = ${day}
+  `;
+  const weightToday = await sql<{ kg: number }>`
+    select weight_kg as kg from weight_logs where user_id = ${uid} and day = ${day} order by updated_at desc limit 1
+  `;
+  const checks = await sql<{ done: unknown }>`select done from habit_checks where user_id = ${uid} and day = ${day}`;
+  const habitRows = await sql<Record<string, unknown>>`select * from habits where user_id = ${uid}`;
+  const microHabits = await sql<{ id: string }>`select id from micro_habits where user_id = ${uid} and active = true`;
+  const weekStart = shiftDayKey(day, -6);
+  const weekMeals = await sql<{ day: string; meals: number; calories: number; protein: number }>`
+    select day, count(*)::float as meals,
+      coalesce(sum(calories), 0)::float as calories,
+      coalesce(sum(protein), 0)::float as protein
+    from meals
+    where user_id = ${uid} and day >= ${weekStart} and day <= ${day}
+    group by day
+  `;
+  const weekWater = await sql<{ day: string; ml: number }>`
+    select day, coalesce(sum(amount_ml), 0)::float as ml from water_logs
+    where user_id = ${uid} and day >= ${weekStart} and day <= ${day}
+    group by day
+  `;
+  const weekWeights = await sql<{ day: string; kg: number }>`
+    select day, weight_kg as kg from weight_logs
+    where user_id = ${uid} and day >= ${weekStart} and day <= ${day}
+  `;
+  const zone = profile?.timezone || "America/Sao_Paulo";
+  const nowHour = hourInTimeZone(new Date(), zone);
+  const qualitative = Boolean(goals?.qualitative || (profile?.age != null && profile.age < 18));
+  const habitFlags = habitRows[0]
+    ? [habitRows[0].water, habitRows[0].produce, habitRows[0].meals, habitRows[0].activity, habitRows[0].sleep]
+    : [true, false, true, false, false];
+  return coachContextFrom({
+    day,
+    timezone: zone,
+    hour: day < dayKeyInTimeZone(new Date(), zone) ? 21 : nowHour,
+    qualitative,
+    tracksWeight: Boolean(profile && ["controlar", "massa", "manter"].includes(profile.goal)) || weekWeights.length > 0,
+    goals,
+    meals,
+    waterMl: Math.round(Number(waterRows[0]?.total ?? 0)),
+    weightKg: weightToday[0] ? Number(weightToday[0].kg) : null,
+    habitsDone: checks.filter((check) => asBool(check.done)).length,
+    habitsTotal: habitFlags.filter((flag) => asBool(flag)).length + microHabits.length,
+    historyDays: fillHistoryDays(
+      daysInclusive(weekStart, day),
+      weekMeals.map((row) => ({
+        day: String(row.day),
+        meals: Number(row.meals),
+        calories: Number(row.calories),
+        protein: Number(row.protein),
+      })),
+      weekWater.map((row) => ({ day: String(row.day), ml: Number(row.ml) })),
+      weekWeights.map((row) => ({ day: String(row.day), kg: Number(row.kg) })),
+    ),
+  });
+}
+
+export const askCoach = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((input: unknown) => parseCoachAsk(input))
+  .handler(async ({ data, context }): Promise<Result<CoachAnswer>> => {
+    return quiet(async () => {
+      const started = Date.now();
+      const sql = await getSql();
+      const uid = scopedUserId(context.userId, data);
+      const coachContext = await loadCoachContext(sql, uid, data.day);
+      const qHash = coachQuestionHash(data.question);
+      let cachedRow: { context_hash: string; payload: string } | undefined;
+      try {
+        const cached = await sql<{ context_hash: string; payload: string }>`
+          select context_hash, payload from coach_cache
+          where user_id = ${uid} and day = ${data.day} and question_hash = ${qHash}
+        `;
+        cachedRow = cached[0];
+      } catch {
+        cachedRow = undefined;
+      }
+      const first = resolveCoachAsk({
+        context: coachContext,
+        question: data.question,
+        cached: cachedRow ? { contextHash: cachedRow.context_hash, payload: cachedRow.payload } : null,
+      });
+      const finish = async (answer: CoachAnswer, cache: "hit" | "miss" | "skip") => {
+        logEvent("coach_resolved", {
+          category: "COACH",
+          userId: uid,
+          operation: "dailyCoach",
+          source: answer.source,
+          cache,
+          success: answer.source !== "fallback",
+          durationMs: Date.now() - started,
+        });
+        return { ok: true as const, data: answer };
+      };
+      if (first.phase === "done") return finish(first.answer, first.answer.source === "cache" ? "hit" : "skip");
+      logEvent("coach_cache_miss", {
+        category: "COACH",
+        userId: uid,
+        operation: "dailyCoach",
+        cache: "miss",
+        success: true,
+        durationMs: Date.now() - started,
+      });
+      const result = await guardedAi(uid, "text", "askCoach", "dailyCoach", async (minor) => {
+        const { getAIProvider } = await import("./ai.server");
+        const call = await getAIProvider().generateDailyCoach(JSON.stringify(coachContextForModel(coachContext)), data.question, { minor });
+        return { value: call.value, usage: call.usage };
+      });
+      const second = resolveCoachAsk({
+        context: coachContext,
+        question: data.question,
+        modelText: result.ok ? result.data : null,
+        modelFailed: !result.ok,
+      });
+      const answer = second.phase === "done" ? second.answer : fallbackCoachAnswer(coachContext);
+      if (second.phase === "done" && second.store) {
+        const payload = second.store.payload;
+        const hash = second.store.contextHash;
+        const qHash = second.store.questionHash;
+        await sql`
+          insert into coach_cache (user_id, day, question_hash, context_hash, payload)
+          values (${uid}, ${data.day}, ${qHash}, ${hash}, ${payload})
+          on conflict (user_id, day, question_hash)
+          do update set context_hash = excluded.context_hash, payload = excluded.payload, created_at = now()
+        `.catch(() => undefined);
+      }
+      return finish(answer, "miss");
     });
   });

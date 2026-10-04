@@ -98,6 +98,26 @@ test("fluxos críticos E01–E25", { timeout: 240_000 }, async () => {
     await meal.getByRole("button", { name: "Repetir refeição", exact: true }).click();
     await page.getByText("Refeição repetida").waitFor();
     assert.equal(await page.getByRole("button", { name: "Pedir um olhar da Calu" }).isVisible(), true);
+    const coach = page.getByRole("region", { name: "CALU Coach" });
+    await coach.getByRole("heading", { name: "CALU Coach" }).waitFor();
+    await page.getByRole("button", { name: "Por que estou vendo isso?" }).click();
+    assert.match(await coach.innerText(), /registro|água|refeição|proteína|kcal/i);
+    const coachBefore = await coach.innerText();
+    await page.getByRole("button", { name: "+200 ml" }).click();
+    await page.getByText("Água registrada").waitFor();
+    await page.waitForFunction((previous) => {
+      const region = document.querySelector('[aria-label="CALU Coach"]');
+      return Boolean(region && region.textContent && region.textContent !== previous);
+    }, coachBefore);
+    await page.getByRole("textbox", { name: "Pergunta para o Coach" }).fill("Como está minha proteína?");
+    await page.getByRole("button", { name: "Perguntar ao Coach" }).click();
+    await page.getByText("A proteína registrada hoje é").waitFor();
+    if (!aiConfigured) {
+      await page.getByRole("textbox", { name: "Pergunta para o Coach" }).fill("Pode explicar com detalhes o conjunto destes registros?");
+      await page.getByRole("button", { name: "Perguntar ao Coach" }).click();
+      await page.getByText("Não consegui atualizar o Coach agora.").waitFor();
+    }
+    await page.getByRole("heading", { name: "Resumo do dia" }).waitFor();
 
     await page.goto(`${base}/registrar?modo=codigo`);
     await page.getByRole("button", { name: "Cadastrar manualmente" }).click();

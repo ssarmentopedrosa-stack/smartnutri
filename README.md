@@ -142,4 +142,17 @@ O diário (`/diario`) é o painel do dia. Os totais saem das refeições já gra
 
 O dia seguinte fica bloqueado na navegação quando o dia visto é hoje ou posterior. O cálculo do exemplo 150 g de arroz tipo 1 + 100 g de feijão carioca + 120 g de frango grelhado está no teste `v31.test.ts`, via `resolveFoodName` e `calculateNutrition`.
 
+## CALU V3.2 — CALU Coach
+
+O Coach lê o mesmo dia que o diário já carregou. Ele não soma nutriente e não grava refeição.
+
+- O cartão em `/diario` sai de `decideCoach` no `getHome`. Abrir o diário, registrar água ou editar quantidade não chama modelo. A IA entra só em "Perguntar ao Coach", quando a pergunta não cabe numa resposta direta (proteína, água, calorias, peso, semana ou o próximo passo).
+- Estados: `GREAT`, `ON_TRACK`, `NEEDS_ATTENTION`, `INCOMPLETE`, `NO_DATA`. Há uma ação principal. "Por que estou vendo isso?" mostra o número que já está no registro.
+- O contexto é montado no servidor com o usuário da sessão. `userId` e totais enviados pelo cliente são ignorados. O JSON do modelo não leva nome, e-mail nem id.
+- `askCoach` reusa `guardedAi`, a quota de texto, o rate limit (`askCoach`, 8 por minuto) e o preço `COACH`. Se a cota, o limite, o provedor ou o JSON falharem, o texto é "Não consegui atualizar o Coach agora. Seus dados continuam salvos normalmente." e o diário segue.
+- Cache em `coach_cache` (`migrations/0006_v32.sql`): usuário + dia + hash da pergunta, invalidado quando o hash do contexto muda. Não guarda o prompt. O insight diário continua em `daily_insights`.
+- Fora de escopo: diagnóstico, medicamento, jejum, emagrecimento, alteração de caloria ou meta. A resposta redireciona sem chamar o modelo.
+- Menor de 18 anos e meta qualitativa não recebem comparação com meta calórica adulta. O fuso do perfil define a hora e o dia.
+
+
 

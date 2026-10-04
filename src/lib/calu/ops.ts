@@ -139,6 +139,7 @@ export async function wipeUserData(sql: Sql, userId: string): Promise<void> {
   await sql`delete from analytics_events where user_id = ${userId}`;
   await sql`delete from rate_limits where user_id = ${userId}`;
   await sql`delete from daily_insights where user_id = ${userId}`;
+  await sql`delete from coach_cache where user_id = ${userId}`;
   await sql`delete from subscriptions where user_id = ${userId}`;
   await sql`delete from profiles where user_id = ${userId}`;
 }

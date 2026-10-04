@@ -34,7 +34,7 @@ if (!url) {
     try {
       await client.query("drop schema if exists public cascade");
       await client.query("create schema public");
-      for (const name of ["0001_auth.sql", "0002_calu.sql", "0003_v21.sql", "0004_v22.sql"]) {
+      for (const name of ["0001_auth.sql", "0002_calu.sql", "0003_v21.sql", "0004_v22.sql", "0005_v31.sql", "0006_v32.sql"]) {
         await client.query(migration(name));
       }
       await client.query(migration("0004_v22.sql"));
@@ -54,6 +54,14 @@ if (!url) {
       assert.equal(leaked.rows.length, 0);
       const owned = await client.query(`select id from meals where user_id = $1`, ["user-a"]);
       assert.equal(owned.rows.length, 1);
+      await client.query(
+        `insert into coach_cache (user_id, day, question_hash, context_hash, payload) values ($1,$2,$3,$4,$5), ($6,$7,$8,$9,$10)`,
+        ["user-a", "2026-10-03", "q", "c", "{\"message\":\"ana\"}", "user-b", "2026-10-03", "q", "c", "{\"message\":\"bruno\"}"],
+      );
+      const coachA = await client.query(`select payload from coach_cache where user_id = $1`, ["user-a"]);
+      assert.equal(coachA.rows.length, 1);
+      assert.match(String(coachA.rows[0]?.payload), /ana/);
+      assert.equal(String(coachA.rows[0]?.payload).includes("bruno"), false);
       await client.query("begin");
       await client.query(
         `insert into meals (id, user_id, day, meal_type, eaten_at, source) values ($1,$2,$3,$4,now(),$5)`,

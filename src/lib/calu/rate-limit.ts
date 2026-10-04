@@ -4,6 +4,7 @@ export const RATE_LIMITS = {
   sendChat: 20,
   lookupBarcode: 30,
   askInsight: 10,
+  askCoach: 8,
   weeklyCoach: 4,
 } as const;
 

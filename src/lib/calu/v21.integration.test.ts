@@ -27,6 +27,7 @@ async function database() {
   await pg.exec(readFileSync(new URL("../../../migrations/0002_calu.sql", import.meta.url), "utf8"));
   await pg.exec(readFileSync(new URL("../../../migrations/0003_v21.sql", import.meta.url), "utf8"));
   await pg.exec(readFileSync(new URL("../../../migrations/0005_v31.sql", import.meta.url), "utf8"));
+  await pg.exec(readFileSync(new URL("../../../migrations/0006_v32.sql", import.meta.url), "utf8"));
   return pg;
 }
 

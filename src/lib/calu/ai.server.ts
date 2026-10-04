@@ -5,7 +5,7 @@
 import { extractJson, parseAnalysis, type Analysis } from "./domain.ts";
 import { validateAiAnalysis } from "./ai-output.ts";
 import { COACH_JSON_HINT } from "./coach.ts";
-import { buildAnalysisUserText, DAILY_INSIGHT_PROMPT, fenceUntrusted } from "./prompts.ts";
+import { buildAnalysisUserText, DAILY_COACH_PROMPT, DAILY_INSIGHT_PROMPT, fenceUntrusted } from "./prompts.ts";
 
 export const CALU_SYSTEM = `Você é Calu, uma assistente de acompanhamento alimentar.
 Sua função é ajudar o usuário a registrar, compreender e acompanhar seus hábitos alimentares.
@@ -79,6 +79,7 @@ export interface AIProvider {
   analyzeMealText(text: string, hint: string, hour: number, options?: { minor?: boolean }): Promise<AiCall<Analysis>>;
   analyzeMealVoice(transcript: string, hint: string, hour: number, options?: { minor?: boolean }): Promise<AiCall<Analysis>>;
   generateDailyInsight(context: string, options?: { minor?: boolean }): Promise<AiCall<string>>;
+  generateDailyCoach(context: string, question: string, options?: { minor?: boolean }): Promise<AiCall<string>>;
   generateWeeklyCoach(context: string, options?: { minor?: boolean }): Promise<AiCall<string>>;
   chat(history: { role: "user" | "assistant"; content: string }[], context: string, options?: { minor?: boolean }): Promise<AiCall<string>>;
 }
@@ -259,6 +260,18 @@ export class GrokProvider implements AIProvider {
     return { value: result.text.replace(/\s+/g, " ").trim().slice(0, 320), usage: result.usage };
   }
 
+  async generateDailyCoach(context: string, question: string, options?: { minor?: boolean }): Promise<AiCall<string>> {
+    const result = await grokComplete(
+      [
+        { role: "system", content: `${DAILY_COACH_PROMPT}\n${systemPrompt(options?.minor)}` },
+        { role: "user", content: `${fenceUntrusted("contexto", context)}\n${fenceUntrusted("pergunta", question)}` },
+      ],
+      true,
+      420,
+    );
+    return { value: result.text, usage: result.usage };
+  }
+
   async generateWeeklyCoach(context: string, options?: { minor?: boolean }): Promise<AiCall<string>> {
     const result = await grokComplete(
       [
@@ -395,6 +408,18 @@ export class GeminiProvider implements AIProvider {
       220,
     );
     return { value: result.text.replace(/\s+/g, " ").trim().slice(0, 320), usage: result.usage };
+  }
+
+  async generateDailyCoach(context: string, question: string, options?: { minor?: boolean }): Promise<AiCall<string>> {
+    const result = await geminiComplete(
+      [
+        { role: "system", content: `${DAILY_COACH_PROMPT}\n${systemPrompt(options?.minor)}` },
+        { role: "user", content: `${fenceUntrusted("contexto", context)}\n${fenceUntrusted("pergunta", question)}` },
+      ],
+      true,
+      420,
+    );
+    return { value: result.text, usage: result.usage };
   }
 
   async generateWeeklyCoach(context: string, options?: { minor?: boolean }): Promise<AiCall<string>> {
