@@ -19,32 +19,65 @@ export const Route = createFileRoute("/registrar")({
   validateSearch: (search: Record<string, unknown>) => ({
     modo: typeof search.modo === "string" ? search.modo : "foto",
     id: typeof search.id === "string" ? search.id : "",
+    manual: search.manual === true || search.manual === 1 || search.manual === "1" || search.manual === "true",
   }),
   component: RegisterPage,
 });
 
 type Phase = "capture" | "analyzing" | "review" | "saved";
 
+function manualProduct(): FoodDraft {
+  return makeFood({
+    id: crypto.randomUUID(),
+    name: "Produto",
+    quantity: 1,
+    unit: "porção",
+    calories: null,
+    protein: null,
+    carbohydrates: null,
+    fat: null,
+    fiber: null,
+    source: "user",
+    dataStatus: "unavailable",
+  });
+}
+
 function RegisterPage() {
-  const { modo, id } = Route.useSearch();
+  const { modo, id, manual } = Route.useSearch();
+  const openManual = modo === "codigo" && manual;
   const { user } = useCurrentUserState();
   const navigate = useNavigate();
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
-  const [phase, setPhase] = useState<Phase>("capture");
+  const [phase, setPhase] = useState<Phase>(openManual ? "review" : "capture");
   const [preview, setPreview] = useState<string>("");
   const [image, setImage] = useState<string>("");
   const [text, setText] = useState("");
   const [listening, setListening] = useState(false);
   const [query, setQuery] = useState("");
   const [code, setCode] = useState("");
-  const [foods, setFoods] = useState<FoodDraft[]>([]);
+  const [foods, setFoods] = useState<FoodDraft[]>(() => (openManual ? [manualProduct()] : []));
   const [mealType, setMealType] = useState<MealType>("lunch");
-  const [uncertainties, setUncertainties] = useState<string[]>([]);
+  const [uncertainties, setUncertainties] = useState<string[]>(() =>
+    openManual ? ["Cadastro manual. Dados não disponíveis até você completar."] : [],
+  );
   const [insight, setInsight] = useState("");
-  const [source, setSource] = useState(modo === "voz" ? "voice" : modo === "texto" ? "text" : modo === "busca" ? "search" : modo === "codigo" ? "barcode" : "photo");
+  const [source, setSource] = useState(openManual ? "manual" : modo === "voz" ? "voice" : modo === "texto" ? "text" : modo === "busca" ? "search" : modo === "codigo" ? "barcode" : "photo");
   const [offlineNote, setOfflineNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (modo !== "codigo" || !manual) return;
+    setFoods([manualProduct()]);
+    setUncertainties(["Cadastro manual. Dados não disponíveis até você completar."]);
+    setSource("manual");
+    setPhase("review");
+  }, [modo, manual]);
 
   useEffect(() => {
     if (modo !== "editar" || !id) return;
@@ -193,6 +226,7 @@ function RegisterPage() {
         });
       draft.nutritionSource = item.nutritionSource;
       draft.nutritionConfidence = item.completeness === "complete" ? 0.9 : item.completeness === "partial" ? 0.55 : 0;
+      (draft as FoodDraft & { barcode?: string }).barcode = clean;
       setFoods([draft]);
       setUncertainties([item.note]);
       setSource("barcode");
@@ -378,45 +412,28 @@ function RegisterPage() {
       ) : null}
 
       {phase === "capture" && modo === "codigo" ? (
-        <form
-          className="mt-6 space-y-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void scanCode(code);
-          }}
-        >
-          <p className="text-muted">Aponte a câmera se o navegador permitir, ou digite o código. Se não acharmos o produto, você cadastra na hora.</p>
-          <input className={controlClass} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} placeholder="789..." />
-          <Button type="submit" className="w-full" disabled={busy}>
-            Buscar produto
-          </Button>
-          <Button
-            variant="secondary"
-            className="w-full"
-            onClick={() => {
-              setFoods([
-                makeFood({
-                  id: crypto.randomUUID(),
-                  name: "Produto",
-                  quantity: 1,
-                  unit: "porção",
-                  calories: null,
-                  protein: null,
-                  carbohydrates: null,
-                  fat: null,
-                  fiber: null,
-                  source: "user",
-                  dataStatus: "unavailable",
-                }),
-              ]);
-              setUncertainties(["Cadastro manual. Dados não disponíveis até você completar."]);
-              setSource("manual");
-              setPhase("review");
+        <div className="mt-6 space-y-3">
+          <form
+            className="space-y-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void scanCode(code);
             }}
           >
+            <p className="text-muted">Aponte a câmera se o navegador permitir, ou digite o código. Se não acharmos o produto, você cadastra na hora.</p>
+            <input className={controlClass} inputMode="numeric" value={code} onChange={(e) => setCode(e.target.value)} placeholder="789..." />
+            <Button type="submit" className="w-full" disabled={busy}>
+              Buscar produto
+            </Button>
+          </form>
+          <a
+            role="button"
+            href="/registrar?modo=codigo&manual=true"
+            className="press inline-flex h-12 w-full items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 text-sm font-medium text-foreground"
+          >
             Cadastrar manualmente
-          </Button>
-        </form>
+          </a>
+        </div>
       ) : null}
 
       {phase === "review" ? (
@@ -424,9 +441,13 @@ function RegisterPage() {
           <p className="text-muted">{source === "photo" || source === "text" || source === "voice" ? "Encontrei aproximadamente..." : "Ajuste antes de salvar."}</p>
           <MealEditor foods={foods} mealType={mealType} onFoods={setFoods} onMealType={setMealType} uncertainties={uncertainties} />
           <AddFoodRow onAdd={(food) => setFoods([...foods, food])} />
-          <Button className="w-full" disabled={busy} onClick={() => void confirm()}>
-            {busy ? "Salvando" : "Confirmar refeição"}
-          </Button>
+          {mounted ? (
+            <Button className="w-full" disabled={busy} onClick={() => void confirm()}>
+              {busy ? "Salvando" : "Confirmar refeição"}
+            </Button>
+          ) : (
+            <p className="text-sm text-muted">Preparando a revisão...</p>
+          )}
         </div>
       ) : null}
 

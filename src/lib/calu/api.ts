@@ -17,7 +17,6 @@ import {
   memoryCommand,
   safetyReply,
   sumFoods,
-  withQuantity,
   type ActivityId,
   type AnalyticsEvent,
   type DietId,
@@ -43,10 +42,11 @@ import {
   wipeAuthIdentity,
   wipeUserData,
 } from "./ops";
-import { normalizeOffProduct } from "./off";
+import { normalizeOffProduct, type OffNormalized } from "./off";
 import { calculateNutrition } from "./nutrition";
 import { resolveFoodName } from "./resolver";
 import { preferStructuredSource } from "./search";
+import { authorizeRecordedFood } from "./authority";
 import { parseBarcode, parseDay, parseEntityId, parseImageBase64, parseAge, parseNotificationEnabled, assertNotFutureDay } from "./validation";
 import { isValidTimeZone, shiftDayKey, dayKeyInTimeZone, hourInTimeZone } from "./timezone";
 import { buildDailyBoard, contextHash, foodRecordState, insightContext, parseDailyInsight, rescaleRecordedFood, type DailyBoard } from "./daily-board";
@@ -326,12 +326,13 @@ async function loadMeals(sql: Sql, userId: string, day: string): Promise<MealDTO
   });
 }
 
-function parseFoods(input: unknown): FoodDraft[] {
+function parseFoods(input: unknown): { foods: FoodDraft[]; barcodes: Record<string, string> } {
   if (!Array.isArray(input) || input.length < 1 || input.length > 20) {
     throw new Error("Inclua pelo menos um alimento.");
   }
-  return input.map((item, index) => {
-    const food = item as Partial<FoodDraft>;
+  const barcodes: Record<string, string> = {};
+  const foods = input.map((item) => {
+    const food = item as Partial<FoodDraft> & { barcode?: unknown };
     const name = String(food.name ?? "").trim();
     if (name.length < 1) throw new Error("Todo alimento precisa de um nome.");
     const unit = UNITS.includes(food.unit as (typeof UNITS)[number]) ? String(food.unit) : "g";
@@ -339,6 +340,8 @@ function parseFoods(input: unknown): FoodDraft[] {
     if (quantity == null || quantity <= 0 || quantity > 10000) throw new Error("Quantidade inválida.");
     const rawId = String(food.id ?? "");
     const id = /^[0-9a-f-]{16,40}$/i.test(rawId) ? rawId : crypto.randomUUID();
+    const barcode = String(food.barcode ?? "").replace(/\D/g, "");
+    if (barcode.length >= 8 && barcode.length <= 32) barcodes[id] = barcode;
     const draft = makeFood({
       id,
       name,
@@ -357,12 +360,6 @@ function parseFoods(input: unknown): FoodDraft[] {
         ? String(food.dataStatus)
         : "unavailable") as FoodDraft["dataStatus"],
     });
-    draft.baseQuantity = num(food.baseQuantity) && num(food.baseQuantity)! > 0 ? num(food.baseQuantity)! : draft.quantity;
-    draft.baseCalories = num(food.baseCalories);
-    draft.baseProtein = num(food.baseProtein);
-    draft.baseCarbohydrates = num(food.baseCarbohydrates);
-    draft.baseFat = num(food.baseFat);
-    draft.baseFiber = num(food.baseFiber);
     draft.nutritionSource = (["TACO", "OPEN_FOOD_FACTS", "USER_CONFIRMED", "AI_ESTIMATE"].includes(String(food.nutritionSource))
       ? food.nutritionSource
       : food.source === "taco"
@@ -376,9 +373,9 @@ function parseFoods(input: unknown): FoodDraft[] {
     draft.portionConfidence = num(food.portionConfidence);
     draft.nutritionConfidence = num(food.nutritionConfidence);
     draft.review = food.review === "high" || food.review === "medium" || food.review === "low" ? food.review : undefined;
-    void index;
-    return withQuantity(draft, draft.quantity);
+    return draft;
   });
+  return { foods, barcodes };
 }
 
 async function writeFoods(sql: Sql, userId: string, mealId: string, foods: FoodDraft[]) {
@@ -749,6 +746,7 @@ type SaveMealInput = {
   uncertainties: string[];
   insight: string;
   foods: FoodDraft[];
+  barcodes: Record<string, string>;
 };
 
 function parseMeal(input: unknown): SaveMealInput {
@@ -764,6 +762,7 @@ function parseMeal(input: unknown): SaveMealInput {
   const uncertainties = Array.isArray(body.uncertainties)
     ? body.uncertainties.map((item) => String(item).slice(0, 180)).slice(0, 6)
     : [];
+  const parsedFoods = parseFoods(body.foods);
   return {
     id,
     day: dayOf(body.day),
@@ -773,8 +772,31 @@ function parseMeal(input: unknown): SaveMealInput {
     note: String(body.note ?? "").slice(0, 280),
     uncertainties,
     insight: String(body.insight ?? "").slice(0, 320),
-    foods: parseFoods(body.foods),
+    foods: parsedFoods.foods,
+    barcodes: parsedFoods.barcodes,
   };
+}
+
+async function loadCachedOff(sql: Sql, code: string): Promise<OffNormalized | null> {
+  const cached = await sql<{ payload: string }>`select payload from barcode_cache where code = ${code} limit 1`;
+  if (!cached[0]) return null;
+  try {
+    const parsed = normalizeOffProduct(JSON.parse(cached[0].payload));
+    return "error" in parsed ? null : parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function authorizeIncoming(sql: Sql, userId: string, foods: FoodDraft[], barcodes: Record<string, string>): Promise<FoodDraft[]> {
+  const authorized: FoodDraft[] = [];
+  for (const food of foods) {
+    const off = barcodes[food.id] ? await loadCachedOff(sql, barcodes[food.id]!) : null;
+    const rows = await sql<Record<string, unknown>>`select * from food_items where id = ${food.id} and user_id = ${userId} limit 1`;
+    const stored = rows[0] ? mapFood(rows[0]) : null;
+    authorized.push(authorizeRecordedFood(food, { fromClient: true, off, stored }));
+  }
+  return authorized;
 }
 
 export const saveMeal = createServerFn({ method: "POST" })
@@ -785,7 +807,8 @@ export const saveMeal = createServerFn({ method: "POST" })
       const sql = await getSql();
       const uid = context.userId;
       await rejectFuture(sql, uid, data.day);
-      const totals = sumFoods(data.foods);
+      const foods = await authorizeIncoming(sql, uid, data.foods, data.barcodes);
+      const totals = sumFoods(foods);
       const uncertaintyJson = JSON.stringify(data.uncertainties);
       await sql.transaction(async (tx) => {
         const owned = await tx<{ user_id: string }>`select user_id from meals where id = ${data.id}`;
@@ -815,7 +838,7 @@ export const saveMeal = createServerFn({ method: "POST" })
           if (data.source === "voice") await trackEvent(tx, uid, "voice_meal_created");
           if (data.source === "barcode") await trackEvent(tx, uid, "barcode_used");
         }
-        await writeFoods(tx, uid, data.id, data.foods);
+        await writeFoods(tx, uid, data.id, foods);
       });
       return { ok: true as const, data: { mealId: data.id } };
     });
@@ -856,7 +879,8 @@ export const duplicateMeal = createServerFn({ method: "POST" })
       const source = meals.find((meal) => meal.id === data.id);
       if (!source) return { ok: false, error: "Refeição não encontrada." };
       const id = crypto.randomUUID();
-      const totals = sumFoods(source.foods);
+      const foods = source.foods.map((food) => authorizeRecordedFood({ ...food, id: crypto.randomUUID() }, { fromClient: false }));
+      const totals = sumFoods(foods);
       await sql.transaction(async (tx) => {
         await tx`
           insert into meals (
@@ -869,12 +893,7 @@ export const duplicateMeal = createServerFn({ method: "POST" })
             ${totals.incomplete}
           )
         `;
-        await writeFoods(
-          tx,
-          uid,
-          id,
-          source.foods.map((food) => ({ ...food, id: crypto.randomUUID() })),
-        );
+        await writeFoods(tx, uid, id, foods);
       });
       return { ok: true as const, data: { mealId: id } };
     });
@@ -901,7 +920,7 @@ export const repeatFood = createServerFn({ method: "POST" })
       `;
       const source = rows[0] ? mapFood(rows[0]) : null;
       if (!source) return { ok: false, error: "Alimento não encontrado." };
-      const food = rescaleRecordedFood({ ...source, id: crypto.randomUUID() }, data.quantity, data.unit);
+      const food = authorizeRecordedFood(rescaleRecordedFood({ ...source, id: crypto.randomUUID() }, data.quantity, data.unit), { fromClient: false });
       const mealId = crypto.randomUUID();
       const totals = sumFoods([food]);
       await sql.transaction(async (tx) => {

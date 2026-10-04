@@ -137,7 +137,8 @@ O diário (`/diario`) é o painel do dia. Os totais saem das refeições já gra
 - Data futura é recusada no servidor para refeição, alimento repetido, água, peso e hábito. A mensagem é “Data futura não pode ser registrada.” O “hoje” usa o fuso do perfil.
 - Notificações aceitam exatamente `true` ou `false`.
 - “Pedir um olhar da Calu” chama `askInsight` uma vez, com `guardedAi` (quota, rate limit, custo). O contexto é JSON do dia, sem nome, e-mail ou foto. A resposta passa por `parseDailyInsight`. O cache é `daily_insights`, chave usuário + dia + hash do contexto. Se a IA falhar, o diário continua e o bloco mostra “CALU está indisponível no momento.” Ou a nota local, se o texto for inválido. Quota e rate limit ainda aparecem como erro.
-- Offline: TACO, água, registro manual e o histórico já carregado seguem. IA e Open Food Facts precisam de rede.
+- Registro manual: "Cadastrar manualmente" fica fora do formulário do código. É um link para `?manual=true`, então a revisão abre mesmo se o clique acontecer antes da hidratação. "Confirmar refeição" só aparece depois que a página está interativa.
+- Autoridade nutricional: em refeição nova ou editada, caloria e macros do cliente não prevalecem sobre TACO nem sobre Open Food Facts. `authorizeRecordedFood` recalcula com o motor e com `portions.ts`. Sem conversão conhecida, o nutriente fica vazio e o registro não entra como confirmado. O histórico antigo não é reprocessado sozinho. O código de barras reusa o cache já gravado na consulta; sem esse snapshot, o número enviado pelo cliente é descartado.
 
 O dia seguinte fica bloqueado na navegação quando o dia visto é hoje ou posterior. O cálculo do exemplo 150 g de arroz tipo 1 + 100 g de feijão carioca + 120 g de frango grelhado está no teste `v31.test.ts`, via `resolveFoodName` e `calculateNutrition`.
 

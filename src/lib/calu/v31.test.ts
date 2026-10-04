@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { makeFood, sumFoods } from "./domain.ts";
+import { authorizeRecordedFood } from "./authority.ts";
 import { suggestSubstitutes } from "./catalog.ts";
 import {
   buildDailyBoard,
@@ -15,6 +16,7 @@ import {
   rescaleRecordedFood,
 } from "./daily-board.ts";
 import { calculateNutrition, toGrams } from "./nutrition.ts";
+import { normalizeOffProduct } from "./off.ts";
 import { lookupPortion } from "./portions.ts";
 import { canonicalOperation } from "./pricing.ts";
 import { resolveFoodName } from "./resolver.ts";
@@ -243,6 +245,281 @@ test("Gemini recebe o MIME da imagem, não força jpeg", () => {
   assert.deepEqual(splitImagePayload("data:image/jpeg;base64,/9j/"), { mime: "image/jpeg", data: "/9j/" });
   assert.deepEqual(splitImagePayload("data:image/jpg;base64,/9j/"), { mime: "image/jpeg", data: "/9j/" });
   assert.deepEqual(splitImagePayload("data:image/webp;base64,UklGR"), { mime: "image/webp", data: "UklGR" });
+});
+
+test("o servidor não persiste macros arbitrários quando a TACO resolve o alimento", () => {
+  const lied = makeFood({
+    id: "11111111-1111-4111-8111-111111111111",
+    name: "arroz",
+    quantity: 150,
+    unit: "g",
+    calories: 1,
+    protein: 999,
+    carbohydrates: 999,
+    fat: 999,
+    fiber: 999,
+    source: "user",
+    dataStatus: "reference",
+  });
+  const saved = authorizeRecordedFood(lied, { fromClient: true });
+  assert.equal(saved.calories, 192);
+  assert.equal(saved.protein, 3.8);
+  assert.equal(saved.carbohydrates, 42.2);
+  assert.equal(saved.fat, 0.3);
+  assert.equal(saved.fiber, 2.4);
+  assert.equal(saved.nutritionSource, "TACO");
+  assert.equal(saved.name, "Arroz, tipo 1, cozido");
+  assert.notEqual(saved.protein, 999);
+
+  const onlyCalories = authorizeRecordedFood({ ...saved, calories: 1, protein: 999, fat: 999 }, { fromClient: true });
+  assert.equal(onlyCalories.calories, 192);
+  assert.equal(onlyCalories.quantity, 150);
+  assert.equal(onlyCalories.protein, 3.8);
+});
+
+test("unidade sem base em gramas não inventa conversão", () => {
+  const food = makeFood({
+    id: "22222222-2222-4222-8222-222222222222",
+    name: "arroz",
+    quantity: 2,
+    unit: "porção",
+    calories: 400,
+    protein: 20,
+    carbohydrates: 40,
+    fat: 10,
+    fiber: 4,
+    source: "taco",
+    dataStatus: "reference",
+  });
+  food.nutritionSource = "TACO";
+  const saved = authorizeRecordedFood(food, { fromClient: true });
+  assert.equal(saved.calories, null);
+  assert.equal(saved.protein, null);
+  assert.equal(saved.fat, null);
+  assert.equal(saved.review, "low");
+  assert.equal(saved.dataStatus, "unavailable");
+  assert.notEqual(foodRecordState(saved), "CONFIRMED");
+  assert.equal(toGrams("Arroz, tipo 1, cozido", 2, "porção"), null);
+});
+
+test("alimento TACO conhecido passa pelo resolver e pelo motor", () => {
+  const resolved = resolveFoodName("Arroz, tipo 1, cozido");
+  assert.equal(resolved.source, "TACO");
+  assert.ok(resolved.per100);
+  const expected = calculateNutrition(resolved.per100!, 150);
+  const saved = authorizeRecordedFood(
+    makeFood({
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Arroz, tipo 1, cozido",
+      quantity: 150,
+      unit: "g",
+      calories: 1,
+      protein: 1,
+      carbohydrates: 1,
+      fat: 1,
+      fiber: 1,
+      source: "taco",
+      dataStatus: "estimate",
+    }),
+    { fromClient: true },
+  );
+  assert.equal(saved.calories, expected.calories);
+  assert.equal(saved.protein, expected.protein);
+  assert.equal(saved.carbohydrates, expected.carbohydrates);
+  assert.equal(saved.fat, expected.fat);
+  assert.equal(saved.fiber, expected.fiber);
+  assert.equal(saved.nutritionSource, "TACO");
+  assert.equal(foodRecordState(saved), "CONFIRMED");
+});
+
+test("Open Food Facts completo é recalculado e o incompleto não é preenchido", () => {
+  const complete = normalizeOffProduct({
+    status: 1,
+    product: {
+      product_name: "Iogurte teste calu",
+      serving_quantity: 100,
+      nutriments: {
+        "energy-kcal_100g": 80,
+        proteins_100g: 4,
+        carbohydrates_100g: 6,
+        fat_100g: 3,
+        fiber_100g: 0,
+      },
+    },
+  });
+  assert.equal("error" in complete, false);
+  if ("error" in complete) return;
+  const saved = authorizeRecordedFood(
+    makeFood({
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "Iogurte teste calu",
+      quantity: 200,
+      unit: "g",
+      calories: 1,
+      protein: 999,
+      carbohydrates: 999,
+      fat: 999,
+      fiber: 999,
+      source: "barcode",
+      dataStatus: "reference",
+    }),
+    { fromClient: true, off: complete },
+  );
+  assert.equal(saved.calories, 160);
+  assert.equal(saved.protein, 8);
+  assert.equal(saved.carbohydrates, 12);
+  assert.equal(saved.fat, 6);
+  assert.equal(saved.fiber, 0);
+  assert.equal(saved.nutritionSource, "OPEN_FOOD_FACTS");
+  assert.equal(foodRecordState(saved), "CONFIRMED");
+
+  const partial = normalizeOffProduct({
+    status: 1,
+    product: {
+      product_name: "Barra teste calu",
+      serving_quantity: 50,
+      nutriments: { "energy-kcal_100g": 200 },
+    },
+  });
+  assert.equal("error" in partial, false);
+  if ("error" in partial) return;
+  assert.equal(partial.completeness, "partial");
+  const half = authorizeRecordedFood(
+    makeFood({
+      id: "55555555-5555-4555-8555-555555555555",
+      name: "Barra teste calu",
+      quantity: 50,
+      unit: "g",
+      calories: 999,
+      protein: 50,
+      carbohydrates: 50,
+      fat: 50,
+      fiber: 50,
+      source: "barcode",
+      dataStatus: "reference",
+    }),
+    { fromClient: true, off: partial },
+  );
+  assert.equal(half.calories, 100);
+  assert.equal(half.protein, null);
+  assert.equal(half.carbohydrates, null);
+  assert.equal(half.fat, null);
+  assert.equal(foodRecordState(half), "PARTIAL");
+
+  const missing = normalizeOffProduct({
+    status: 1,
+    product: { product_name: "Sem rotulo calu", nutriments: {} },
+  });
+  assert.equal("error" in missing, false);
+  if ("error" in missing) return;
+  const empty = authorizeRecordedFood(
+    makeFood({
+      id: "66666666-6666-4666-8666-666666666666",
+      name: "Sem rotulo calu",
+      quantity: 100,
+      unit: "g",
+      calories: 400,
+      protein: 10,
+      carbohydrates: 10,
+      fat: 10,
+      fiber: 1,
+      source: "barcode",
+      dataStatus: "reference",
+    }),
+    { fromClient: true, off: missing },
+  );
+  assert.equal(empty.calories, null);
+  assert.equal(empty.protein, null);
+  assert.notEqual(foodRecordState(empty), "CONFIRMED");
+
+  const stored = makeFood({
+    id: "77777777-7777-4777-8777-777777777777",
+    name: "Iogurte teste calu",
+    quantity: 100,
+    unit: "g",
+    calories: 80,
+    protein: 4,
+    carbohydrates: 6,
+    fat: 3,
+    fiber: 0,
+    source: "barcode",
+    dataStatus: "reference",
+  });
+  stored.nutritionSource = "OPEN_FOOD_FACTS";
+  const edited = authorizeRecordedFood({ ...stored, calories: 1, protein: 999, fat: 999, quantity: 100 }, { fromClient: true, stored });
+  assert.equal(edited.calories, 80);
+  assert.equal(edited.protein, 4);
+  assert.equal(edited.fat, 3);
+});
+
+test("valores autorizados é que seguem para a tabela, não os do cliente", async () => {
+  const pg = new PGlite();
+  await pg.waitReady;
+  for (const name of ["0001_auth.sql", "0002_calu.sql", "0003_v21.sql", "0004_v22.sql", "0005_v31.sql"]) {
+    await pg.exec(readFileSync(new URL(`../../../migrations/${name}`, import.meta.url), "utf8"));
+  }
+  const saved = authorizeRecordedFood(
+    makeFood({
+      id: "88888888-8888-4888-8888-888888888888",
+      name: "arroz",
+      quantity: 150,
+      unit: "g",
+      calories: 1,
+      protein: 999,
+      carbohydrates: 999,
+      fat: 999,
+      fiber: 999,
+      source: "user",
+      dataStatus: "reference",
+    }),
+    { fromClient: true },
+  );
+  const mealId = "99999999-9999-4999-8999-999999999999";
+  await pg.query(
+    `insert into meals (id, user_id, day, meal_type, eaten_at, source, calories, protein, carbohydrates, fat, fiber, incomplete)
+     values ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10, $11)`,
+    [mealId, "user-a", "2026-10-03", "lunch", "manual", saved.calories, saved.protein, saved.carbohydrates, saved.fat, saved.fiber, false],
+  );
+  await pg.query(
+    `insert into food_items (
+      id, meal_id, user_id, name, quantity, unit, calories, protein, carbohydrates, fat, fiber,
+      source, data_status, base_quantity, base_calories, base_protein, base_carbohydrates, base_fat, base_fiber, nutrition_source
+    ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+    [
+      saved.id,
+      mealId,
+      "user-a",
+      saved.name,
+      saved.quantity,
+      saved.unit,
+      saved.calories,
+      saved.protein,
+      saved.carbohydrates,
+      saved.fat,
+      saved.fiber,
+      saved.source,
+      saved.dataStatus,
+      saved.baseQuantity,
+      saved.baseCalories,
+      saved.baseProtein,
+      saved.baseCarbohydrates,
+      saved.baseFat,
+      saved.baseFiber,
+      saved.nutritionSource,
+    ],
+  );
+  const row = await pg.query<{ calories: number; protein: number; name: string }>(`select calories, protein, name from food_items where id = $1`, [saved.id]);
+  assert.equal(Number(row.rows[0]?.calories), 192);
+  assert.notEqual(Number(row.rows[0]?.protein), 999);
+  assert.equal(row.rows[0]?.name, "Arroz, tipo 1, cozido");
+  const api = readFileSync(new URL("./api.ts", import.meta.url), "utf8");
+  const screen = readFileSync(new URL("../../routes/registrar.tsx", import.meta.url), "utf8");
+  assert.match(api, /authorizeRecordedFood/);
+  const manualAt = screen.indexOf("Cadastrar manualmente");
+  const formEnd = screen.lastIndexOf("</form>", manualAt);
+  assert.ok(manualAt > formEnd);
+  assert.match(screen.slice(formEnd, manualAt), /href="\/registrar\?modo=codigo&manual=true"/);
+  assert.match(screen.slice(formEnd, manualAt), /role="button"/);
 });
 
 test("migration 0005 cria o cache e não apaga refeição antiga", async () => {

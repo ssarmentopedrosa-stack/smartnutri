@@ -5,7 +5,7 @@ import { format, parseISO } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { addWater, getHome, saveMeal, track, type HomeData } from "@/lib/calu/api";
-import { cacheHome, dropQueued, friendlyError, isOfflineError, readCachedHome, readQueue, todayKey } from "@/lib/calu/client";
+import { cacheHome, dropQueued, friendlyError, isOfflineError, readCachedHome, readQueue, rememberTimeZone, todayKey } from "@/lib/calu/client";
 import { localInsight, recommend, round1, sumFoods, mealLabel, type GoalTargets } from "@/lib/calu/domain";
 import { Boot, Button, Meter, Shell } from "@/components/calu/chrome";
 
@@ -84,6 +84,7 @@ function HomeBody({ day, userId, onDay }: { day: string; userId: string; onDay: 
   useEffect(() => {
     const zone = home?.profile?.timezone;
     if (!zone) return;
+    rememberTimeZone(zone);
     const zoned = todayKey(new Date(), zone);
     if (zoned !== day) onDay(zoned);
   }, [home?.profile?.timezone, day, onDay]);
@@ -201,15 +202,15 @@ function HomeBody({ day, userId, onDay }: { day: string; userId: string; onDay: 
 
         <h2 className="mt-8 font-display text-2xl font-medium">Registrar refeição</h2>
         <div className="mt-3 grid grid-cols-2 gap-3">
-          <Action icon={Camera} label="Foto" onClick={() => navigate({ to: "/registrar", search: { modo: "foto", id: "" } })} />
-          <Action icon={Mic} label="Voz" onClick={() => navigate({ to: "/registrar", search: { modo: "voz", id: "" } })} />
-          <Action icon={PenLine} label="Texto" onClick={() => navigate({ to: "/registrar", search: { modo: "texto", id: "" } })} />
-          <Action icon={Search} label="Buscar alimento" onClick={() => navigate({ to: "/registrar", search: { modo: "busca", id: "" } })} />
+          <Action icon={Camera} label="Foto" onClick={() => navigate({ to: "/registrar", search: { modo: "foto", id: "", manual: false } })} />
+          <Action icon={Mic} label="Voz" onClick={() => navigate({ to: "/registrar", search: { modo: "voz", id: "", manual: false } })} />
+          <Action icon={PenLine} label="Texto" onClick={() => navigate({ to: "/registrar", search: { modo: "texto", id: "", manual: false } })} />
+          <Action icon={Search} label="Buscar alimento" onClick={() => navigate({ to: "/registrar", search: { modo: "busca", id: "", manual: false } })} />
         </div>
         <Button
           variant="ghost"
           className="mt-2 w-full"
-          onClick={() => navigate({ to: "/registrar", search: { modo: "codigo", id: "" } })}
+          onClick={() => navigate({ to: "/registrar", search: { modo: "codigo", id: "", manual: false } })}
         >
           <ScanBarcode className="size-4" />
           Código de barras

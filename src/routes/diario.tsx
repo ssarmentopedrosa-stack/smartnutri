@@ -79,7 +79,7 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
 
   function edit(meal: MealDTO) {
     sessionStorage.setItem("calu.edit", JSON.stringify(meal));
-    void navigate({ to: "/registrar", search: { modo: "editar", id: meal.id } });
+    void navigate({ to: "/registrar", search: { modo: "editar", id: meal.id, manual: false } });
   }
 
   async function persist(meal: MealDTO, foods: FoodDraft[], message: string) {
@@ -140,7 +140,7 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
           <h2 className="font-display text-3xl font-medium">{hello}</h2>
           <p className="mt-2 text-muted">Vamos começar seu dia? Registre sua primeira refeição e o CALU vai acompanhando sua evolução.</p>
           <div className="mt-4 space-y-2">
-            <Button className="w-full" onClick={() => navigate({ to: "/registrar", search: { modo: "busca", id: "" } })}>
+            <Button className="w-full" onClick={() => navigate({ to: "/registrar", search: { modo: "busca", id: "", manual: false } })}>
               + Registrar alimento
             </Button>
             <Button variant="secondary" className="w-full" onClick={() => void drink(200)}>
@@ -212,7 +212,7 @@ function DiaryBody({ day, setDay }: { day: string; setDay: (day: string) => void
       )}
 
       <div className="mt-4">
-        <Button className="w-full" onClick={() => navigate({ to: "/registrar", search: { modo: "busca", id: "" } })}>
+        <Button className="w-full" onClick={() => navigate({ to: "/registrar", search: { modo: "busca", id: "", manual: false } })}>
           + Adicionar alimento
         </Button>
       </div>

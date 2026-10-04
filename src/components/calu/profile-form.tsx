@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { ACTIVITIES, DIETS, GOALS, type ActivityId, type DietId, type GoalId, type SexId } from "@/lib/calu/domain";
+import { rememberTimeZone } from "@/lib/calu/client";
 import { COMMON_TIMEZONES } from "@/lib/calu/timezone";
 import { Field, controlClass } from "./chrome";
 
@@ -51,6 +53,9 @@ export function ProfileFields({
   showConsent?: boolean;
 }) {
   const set = (patch: Partial<ProfileFormValue>) => onChange({ ...value, ...patch });
+  useEffect(() => {
+    rememberTimeZone(value.timezone);
+  }, [value.timezone]);
   return (
     <div className="space-y-4">
       <Field label="Nome">

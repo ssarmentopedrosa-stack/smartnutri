@@ -16,8 +16,29 @@ export type MealPayload = {
   foods: FoodDraft[];
 };
 
+const ZONE_KEY = "calu.timezone";
+
+export function rememberTimeZone(timeZone: string) {
+  if (!isValidTimeZone(timeZone)) return;
+  try {
+    sessionStorage.setItem(ZONE_KEY, timeZone);
+  } catch {
+    /* ambiente sem storage */
+  }
+}
+
+function rememberedTimeZone(): string | undefined {
+  try {
+    const value = sessionStorage.getItem(ZONE_KEY);
+    return value && isValidTimeZone(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function todayKey(date = new Date(), timeZone?: string): string {
-  if (timeZone && isValidTimeZone(timeZone)) return dayKeyInTimeZone(date, timeZone);
+  const zone = timeZone || rememberedTimeZone();
+  if (zone && isValidTimeZone(zone)) return dayKeyInTimeZone(date, zone);
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");

@@ -225,11 +225,19 @@ function ProfileBody({ day }: { day: string }) {
           <input
             type="checkbox"
             checked={home.notifications}
-            onChange={(e) =>
-              void setNotifications({ data: e.target.checked }).then((result) => {
-                if (result.ok) setHome({ ...home, notifications: result.data.enabled });
-              })
-            }
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              const previous = home.notifications;
+              setHome({ ...home, notifications: enabled });
+              void setNotifications({ data: enabled }).then((result) => {
+                if (!result.ok) {
+                  setHome({ ...home, notifications: previous });
+                  toast.error(result.error);
+                  return;
+                }
+                setHome({ ...home, notifications: result.data.enabled });
+              });
+            }}
           />
         </label>
         {home.notifications && !home.meals.some((m) => m.mealType === "lunch") && new Date().getHours() >= 11 && new Date().getHours() <= 14 ? (
