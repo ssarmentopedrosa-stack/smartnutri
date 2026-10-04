@@ -331,6 +331,7 @@ function RegisterPage() {
       ) : null}
 
       {phase === "capture" && modo === "texto" ? (
+        mounted ? (
         <form
           className="mt-6 space-y-3"
           onSubmit={(event) => {
@@ -348,6 +349,9 @@ function RegisterPage() {
             Interpretar
           </Button>
         </form>
+        ) : (
+          <p className="mt-6 text-sm text-muted">Preparando o registro...</p>
+        )
       ) : null}
 
       {phase === "capture" && modo === "voz" ? (
